@@ -1,0 +1,53 @@
+{
+  "name": "gainz",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "dev:worker": "tsx watch src/worker.ts",
+    "build": "next build",
+    "start": "next start",
+    "worker": "tsx src/worker.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "simulate": "tsx scripts/simulate.ts",
+    "replay": "tsx scripts/replay.ts",
+    "signals:refresh": "tsx scripts/refresh-signals.ts"
+  },
+  "dependencies": {
+    "@alpacahq/alpaca-trade-api": "^3.0.1",
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "better-sqlite3": "^11.5.0",
+    "dotenv": "^16.4.5",
+    "drizzle-orm": "^0.36.0",
+    "next": "^15.1.0",
+    "node-cron": "^3.0.3",
+    "pino": "^9.5.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "undici": "^7.1.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.0",
+    "@types/node-cron": "^3.0.11",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "drizzle-kit": "^0.28.0",
+    "eslint": "^9.17.0",
+    "eslint-config-next": "^15.1.0",
+    "prettier": "^3.4.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

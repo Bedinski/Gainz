@@ -1,0 +1,68 @@
+:root {
+  --bg: #0b0d10;
+  --fg: #e5e7eb;
+  --muted: #9ca3af;
+  --border: #1f2328;
+  --accent: #22c55e;
+  --danger: #ef4444;
+  --warn: #f59e0b;
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.container {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+h1, h2, h3 { color: var(--fg); margin: 0 0 12px; }
+h1 { font-size: 24px; }
+h2 { font-size: 18px; margin-top: 24px; }
+h3 { font-size: 14px; color: var(--muted); }
+
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 500; }
+
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+.badge-approved { background: rgba(34,197,94,0.15); color: var(--accent); }
+.badge-rejected { background: rgba(239,68,68,0.15); color: var(--danger); }
+.badge-clamped { background: rgba(245,158,11,0.15); color: var(--warn); }
+.badge-paper { background: rgba(96,165,250,0.15); color: #60a5fa; }
+.badge-live { background: rgba(239,68,68,0.15); color: var(--danger); }
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.row { display: flex; gap: 16px; flex-wrap: wrap; }
+.row > * { flex: 1; min-width: 200px; }
+
+.muted { color: var(--muted); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+a { color: #60a5fa; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+button {
+  background: var(--accent);
+  color: #052e16;
+  border: 0;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button.secondary { background: #374151; color: var(--fg); }
+button.danger { background: var(--danger); color: white; }

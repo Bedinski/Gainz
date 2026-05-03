@@ -1,0 +1,114 @@
+import { sqliteTable, text, integer, real, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
+
+export const decisions = sqliteTable('decisions', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  timestamp: integer('timestamp', { mode: 'timestamp_ms' }).notNull(),
+  model: text('model').notNull(),
+  promptTokens: integer('prompt_tokens'),
+  completionTokens: integer('completion_tokens'),
+  rawResponse: text('raw_response').notNull(),
+  parsedProposalsJson: text('parsed_proposals_json').notNull(),
+  marketSnapshotJson: text('market_snapshot_json').notNull(),
+  congressSignalsJson: text('congress_signals_json').notNull(),
+  errorMessage: text('error_message'),
+});
+
+export const proposals = sqliteTable('proposals', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  decisionId: integer('decision_id').notNull().references(() => decisions.id),
+  symbol: text('symbol').notNull(),
+  side: text('side', { enum: ['buy', 'sell'] }).notNull(),
+  qty: real('qty'),
+  notionalUsd: real('notional_usd'),
+  entryType: text('entry_type', { enum: ['market', 'stop', 'limit'] }),
+  entryTriggerPrice: real('entry_trigger_price'),
+  stopLossPct: real('stop_loss_pct'),
+  trailingStopPct: real('trailing_stop_pct'),
+  reasoning: text('reasoning'),
+  guardrailStatus: text('guardrail_status', { enum: ['approved', 'rejected', 'clamped'] }).notNull(),
+  guardrailReason: text('guardrail_reason'),
+});
+
+export const orders = sqliteTable('orders', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  proposalId: integer('proposal_id').references(() => proposals.id),
+  alpacaOrderId: text('alpaca_order_id'),
+  parentAlpacaOrderId: text('parent_alpaca_order_id'),
+  symbol: text('symbol').notNull(),
+  side: text('side', { enum: ['buy', 'sell'] }).notNull(),
+  type: text('type', {
+    enum: ['market', 'stop', 'stop_limit', 'trailing_stop', 'limit'],
+  }).notNull(),
+  qty: real('qty').notNull(),
+  status: text('status').notNull(),
+  filledAvgPrice: real('filled_avg_price'),
+  submittedAt: integer('submitted_at', { mode: 'timestamp_ms' }).notNull(),
+  filledAt: integer('filled_at', { mode: 'timestamp_ms' }),
+});
+
+export const positionsMeta = sqliteTable('positions_meta', {
+  symbol: text('symbol').primaryKey(),
+  openedAt: integer('opened_at', { mode: 'timestamp_ms' }).notNull(),
+  entryPrice: real('entry_price').notNull(),
+  qty: real('qty').notNull(),
+  atrAtEntry: real('atr_at_entry').notNull(),
+  currentStopAlpacaOrderId: text('current_stop_alpaca_order_id'),
+  currentStopType: text('current_stop_type', { enum: ['fixed', 'trailing'] }).notNull(),
+  currentStopPrice: real('current_stop_price'),
+  trailingStopPct: real('trailing_stop_pct'),
+  highestPriceSeen: real('highest_price_seen').notNull(),
+});
+
+export const dailyState = sqliteTable('daily_state', {
+  date: text('date').primaryKey(), // YYYY-MM-DD in CRON_TZ
+  realizedPnl: real('realized_pnl').notNull().default(0),
+  tradeCount: integer('trade_count').notNull().default(0),
+  halted: integer('halted', { mode: 'boolean' }).notNull().default(false),
+  haltReason: text('halt_reason'),
+});
+
+export const botState = sqliteTable('bot_state', {
+  id: integer('id').primaryKey(), // singleton row, id=1
+  enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+});
+
+export const congressTrades = sqliteTable(
+  'congress_trades',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    source: text('source', { enum: ['stockwatcher', 'capitoltrades', 'quiver'] }).notNull(),
+    sourceId: text('source_id').notNull(),
+    filerName: text('filer_name').notNull(),
+    filerChamber: text('filer_chamber', { enum: ['senate', 'house'] }),
+    filerParty: text('filer_party'),
+    filerState: text('filer_state'),
+    filerCommittees: text('filer_committees'),
+    symbol: text('symbol').notNull(),
+    transactionType: text('transaction_type', { enum: ['buy', 'sell', 'exchange'] }).notNull(),
+    transactionDate: text('transaction_date').notNull(), // YYYY-MM-DD
+    disclosureDate: text('disclosure_date'),
+    amountMinUsd: real('amount_min_usd'),
+    amountMaxUsd: real('amount_max_usd'),
+    rawJson: text('raw_json').notNull(),
+    fetchedAt: integer('fetched_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (t) => ({
+    sourceUnique: uniqueIndex('congress_source_unique').on(t.source, t.sourceId),
+    symbolDate: index('congress_symbol_date').on(t.symbol, t.transactionDate),
+  }),
+);
+
+export const earningsCalendar = sqliteTable(
+  'earnings_calendar',
+  {
+    symbol: text('symbol').notNull(),
+    earningsDate: text('earnings_date').notNull(), // YYYY-MM-DD
+    timeOfDay: text('time_of_day', { enum: ['bmo', 'amc', 'unknown'] }).notNull().default('unknown'),
+    source: text('source').notNull(),
+    fetchedAt: integer('fetched_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (t) => ({
+    pk: uniqueIndex('earnings_pk').on(t.symbol, t.earningsDate),
+  }),
+);

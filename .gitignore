@@ -1,0 +1,35 @@
+# deps
+node_modules/
+
+# next
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+# env
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+
+# secrets / data
+*.db
+*.db-journal
+*.sqlite
+*.sqlite-journal
+/data/
+claude-auth/
+
+# logs
+*.log
+npm-debug.log*
+
+# editor / os
+.DS_Store
+.vscode/
+.idea/
+
+# test
+coverage/
