@@ -8,25 +8,48 @@ interface Row {
   filer_party: string | null;
   filer_state: string | null;
   filer_committees: string | null;
+  filer_is_politician: number;
   transaction_type: 'buy' | 'sell' | 'exchange';
   transaction_date: string;
   disclosure_date: string | null;
   amount_min_usd: number | null;
   amount_max_usd: number | null;
+  committee_fit_boost: number;
+  cluster_size: number;
 }
 
-export function loadCongressSignals(symbols: string[], lookbackDays: number): CongressSignals {
+export interface LoadCongressSignalsOpts {
+  /** When true (default) only filings with committee_fit OR cluster_size >= 2 are returned. */
+  requireBoost?: boolean;
+}
+
+/**
+ * Returns recent congressional filings for the given symbols, post-filter.
+ * Filings that survive ingestion (refresh.applyIngestionFilters) are further
+ * narrowed here to only those with at least one boost factor — preventing
+ * generic noise from reaching the trading prompt.
+ */
+export function loadCongressSignals(
+  symbols: string[],
+  lookbackDays: number,
+  opts: LoadCongressSignalsOpts = {},
+): CongressSignals {
   if (symbols.length === 0) return {};
+  const requireBoost = opts.requireBoost ?? true;
   const cutoff = isoDate(new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000));
   const db = getRawSqlite();
   const placeholders = symbols.map(() => '?').join(',');
+  const boostClause = requireBoost ? 'AND (committee_fit_boost = 1 OR cluster_size >= 2)' : '';
   const rows = db
     .prepare(
       `SELECT symbol, filer_name, filer_chamber, filer_party, filer_state, filer_committees,
-              transaction_type, transaction_date, disclosure_date, amount_min_usd, amount_max_usd
+              filer_is_politician, transaction_type, transaction_date, disclosure_date,
+              amount_min_usd, amount_max_usd, committee_fit_boost, cluster_size
        FROM congress_trades
        WHERE symbol IN (${placeholders})
          AND transaction_date >= ?
+         AND COALESCE(filer_is_politician, 1) = 1
+         ${boostClause}
        ORDER BY transaction_date DESC`,
     )
     .all(...symbols.map((s) => s.toUpperCase()), cutoff) as Row[];
@@ -46,6 +69,8 @@ export function loadCongressSignals(symbols: string[], lookbackDays: number): Co
       disclosureDate: r.disclosure_date ?? undefined,
       amountMinUsd: r.amount_min_usd ?? undefined,
       amountMaxUsd: r.amount_max_usd ?? undefined,
+      committeeFitBoost: r.committee_fit_boost === 1,
+      clusterSize: r.cluster_size,
     };
     out[r.symbol]!.push(sig);
   }

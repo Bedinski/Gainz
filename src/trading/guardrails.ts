@@ -13,6 +13,12 @@ export interface GuardrailContext {
   isHaltedToday: boolean;
   tradesToday: number;
   upcomingEarningsDays?: number; // days until earnings for the symbol; undefined if none
+  /**
+   * Settled cash available for new buys on a cash account, after subtracting
+   * today's unsettled sell proceeds and the configured reserve. Undefined
+   * skips the check (margin accounts, paper without the cash-account flag).
+   */
+  settledCashAvailable?: number;
 }
 
 /**
@@ -132,6 +138,57 @@ export function evaluateProposal(
       }
       clamped.notionalUsd = room;
       didClamp = true;
+    }
+  }
+
+  // Settled-cash check (cash-account T+1). Applied last so all clamping has
+  // settled and we know the final intended notional.
+  if (
+    proposal.side === 'buy' &&
+    ctx.settledCashAvailable !== undefined &&
+    clamped.notionalUsd !== undefined
+  ) {
+    const ceiling = Math.max(0, ctx.settledCashAvailable - cfg.RESERVE_SETTLED_CASH_USD);
+    if (clamped.notionalUsd > ceiling) {
+      if (ceiling <= 0) {
+        return {
+          status: 'rejected',
+          reason: `settled cash exhausted: available=${ctx.settledCashAvailable.toFixed(0)} reserve=${cfg.RESERVE_SETTLED_CASH_USD}`,
+        };
+      }
+      clamped.notionalUsd = ceiling;
+      didClamp = true;
+    }
+  }
+
+  // Structured-signal score gate (improvement #3). If a `signals` object is
+  // present, demand convergence + zero conflicts. Earnings blackout is enforced
+  // via Claude's `earnings_proximity` field as a redundant check (the earnings
+  // table is the primary source above).
+  if (proposal.side === 'buy' && proposal.signals) {
+    const s = proposal.signals;
+    const score =
+      (s.technical?.strength ?? 0) +
+      (s.congress?.strength ?? 0) +
+      (s.news?.strength ?? 0);
+    if (score < cfg.MIN_SIGNAL_SCORE) {
+      return {
+        status: 'rejected',
+        reason: `signal score ${score} < MIN_SIGNAL_SCORE ${cfg.MIN_SIGNAL_SCORE}`,
+      };
+    }
+    const conflicts = s.conflicts ?? [];
+    if (conflicts.length > cfg.MAX_CONFLICTS) {
+      return {
+        status: 'rejected',
+        reason: `conflicts=${conflicts.length} > MAX_CONFLICTS ${cfg.MAX_CONFLICTS}: ${conflicts.slice(0, 3).join('; ')}`,
+      };
+    }
+    if (s.earnings_proximity === 'within_blackout') {
+      return {
+        status: 'rejected',
+        reason: 'earnings_proximity=within_blackout per Claude signals',
+      };
     }
   }
 

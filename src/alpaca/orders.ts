@@ -8,6 +8,7 @@ export interface ExecuteResult {
   alpacaOrderId?: string;
   parentAlpacaOrderId?: string;
   filledAvgPrice?: number;
+  filledQty?: number;
   status: string;
   error?: string;
   dryRun?: boolean;
@@ -16,12 +17,15 @@ export interface ExecuteResult {
 /**
  * Translates a (clamped) TradeProposal into the appropriate Alpaca order.
  *
- * Buys: bracket order with parent stop-buy (or market/limit per entryType)
- *       and a fixed stop-loss child. The cycle-end manage step later
- *       upgrades the fixed stop to trailing once in profit.
+ * Buys:
+ *   - Notional path (preferred for cash-account / fractional sizing): two-step
+ *     `submitNotionalBracket` — parent buy by USD, protective stop attached
+ *     after fill with the actual fractional qty.
+ *   - Whole-share path (legacy): bracket order with parent stop-buy and a
+ *     fixed stop-loss child.
  *
- * Sells: cancel any open trailing stop for the symbol, then market sell
- *        the position quantity (requires caller to pass qty).
+ * Sells: cancel any open trailing stop for the symbol, then market-sell the
+ *        position quantity (caller passes qty).
  */
 export async function executeOrder(
   client: AlpacaClient,
@@ -52,7 +56,7 @@ export async function executeOrder(
       return { ok: true, alpacaOrderId: r.id, status: r.status };
     }
 
-    // buy: bracket with stop-loss child
+    // buy: pick path
     const stopLossPct = proposal.stopLossPct!;
     const fixedStopPrice = currentPrice * (1 - stopLossPct / 100);
     const atrStopPrice = currentPrice - cfg.ATR_MULT * atr14;
@@ -65,6 +69,30 @@ export async function executeOrder(
       entryTriggerPrice = proposal.entryTriggerPrice ?? currentPrice;
     }
 
+    // Use notional bracket when the proposal is sized in USD. This is the
+    // mandatory path during the cash-account phase since allowlist tickers
+    // can be priced above the per-position cap.
+    if (proposal.notionalUsd !== undefined && proposal.qty === undefined) {
+      const r = await client.submitNotionalBracket({
+        symbol: proposal.symbol,
+        side: 'buy',
+        notionalUsd: proposal.notionalUsd,
+        entryType: proposal.entryType ?? 'stop',
+        entryTriggerPrice,
+        stopLossPrice,
+        timeInForce: 'day',
+      });
+      return {
+        ok: true,
+        alpacaOrderId: r.parentOrderId,
+        parentAlpacaOrderId: r.stopOrderId,
+        status: r.parentStatus,
+        filledQty: r.filledQty,
+        filledAvgPrice: r.filledAvgPrice,
+      };
+    }
+
+    // Whole-share bracket (legacy / higher-capital path).
     const r = await client.submitBracket({
       symbol: proposal.symbol,
       side: 'buy',

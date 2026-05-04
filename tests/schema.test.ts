@@ -69,4 +69,64 @@ describe('toCamel', () => {
       entryType: 'stop',
     });
   });
+
+  it('passes the structured signals object through', () => {
+    const camel = toCamel({
+      symbol: 'PLTR',
+      side: 'buy',
+      notional_usd: 300,
+      signals: {
+        technical: { strength: 2, evidence: 'breakout' },
+        congress: { strength: 1, evidence: 'cluster' },
+        news: { strength: 1, evidence: 'guidance' },
+        earnings_proximity: 'clear',
+        conflicts: [],
+      },
+    });
+    expect(camel.signals?.technical.strength).toBe(2);
+    expect(camel.signals?.conflicts).toEqual([]);
+  });
+});
+
+describe('signals schema', () => {
+  it('parses a valid signals block', () => {
+    const parsed = decisionResponseSchema.parse({
+      proposals: [
+        {
+          symbol: 'AAPL',
+          side: 'buy',
+          notional_usd: 300,
+          signals: {
+            technical: { strength: 2, evidence: 'breakout' },
+            congress: { strength: 1, evidence: 'one filing' },
+            news: { strength: 0, evidence: 'nothing' },
+            earnings_proximity: 'clear',
+            conflicts: [],
+          },
+        },
+      ],
+    });
+    expect(parsed.proposals[0]!.signals?.earnings_proximity).toBe('clear');
+  });
+
+  it('rejects strength outside {0,1,2}', () => {
+    expect(() =>
+      decisionResponseSchema.parse({
+        proposals: [
+          {
+            symbol: 'AAPL',
+            side: 'buy',
+            notional_usd: 300,
+            signals: {
+              technical: { strength: 5, evidence: 'x' },
+              congress: { strength: 0, evidence: 'x' },
+              news: { strength: 0, evidence: 'x' },
+              earnings_proximity: 'clear',
+              conflicts: [],
+            },
+          },
+        ],
+      }),
+    ).toThrow();
+  });
 });

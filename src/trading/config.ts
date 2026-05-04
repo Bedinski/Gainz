@@ -1,9 +1,23 @@
 import { z } from 'zod';
 
+/**
+ * Proper string-to-boolean coercer. `boolFromEnv` is broken for our
+ * use: it does `Boolean(value)`, which makes any non-empty string true —
+ * including the literal "false". Anyone with `SAFE_MODE=false` in their .env
+ * would otherwise get SAFE_MODE on. Treat the standard truthy spellings as
+ * true and everything else as false.
+ */
+const boolFromEnv = z
+  .union([z.boolean(), z.string()])
+  .transform((v) => {
+    if (typeof v === 'boolean') return v;
+    return /^(1|true|yes|on)$/i.test(v.trim());
+  });
+
 const envSchema = z.object({
   TRADING_MODE: z.enum(['paper', 'live']).default('paper'),
   LIVE_TRADING_CONFIRMED: z.string().optional(),
-  SAFE_MODE: z.coerce.boolean().default(false),
+  SAFE_MODE: boolFromEnv.default(false),
 
   ALPACA_KEY_ID: z.string().optional(),
   ALPACA_SECRET_KEY: z.string().optional(),
@@ -45,7 +59,26 @@ const envSchema = z.object({
   CONGRESS_SIGNAL_PROVIDER: z.enum(['stockwatcher', 'capitoltrades', 'quiver']).default('stockwatcher'),
   CONGRESS_LOOKBACK_DAYS: z.coerce.number().int().positive().default(30),
   CONGRESS_MAX_TRADES_PER_SYMBOL: z.coerce.number().int().positive().default(5),
+  CONGRESS_REQUIRE_OWN_TRADE: boolFromEnv.default(true),
+  CONGRESS_MIN_AMOUNT_USD: z.coerce.number().min(0).default(50000),
+  CONGRESS_MAX_AGE_DAYS: z.coerce.number().int().positive().default(14),
+  CLUSTER_WINDOW_DAYS: z.coerce.number().int().positive().default(7),
   QUIVER_API_KEY: z.string().optional(),
+
+  ALPACA_NEWS_ENABLED: boolFromEnv.default(false),
+  NEWS_LOOKBACK_HOURS: z.coerce.number().int().positive().default(24),
+  NEWS_MAX_ITEMS_PER_SYMBOL: z.coerce.number().int().positive().default(3),
+  NEWS_CATEGORIES_ALLOWED: z
+    .string()
+    .default('earnings,guidance,m_and_a,regulatory,exec_change')
+    .transform((s) => s.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean)),
+  NEWS_CLASSIFIER_MODEL: z.string().default('claude-haiku-4-5-20251001'),
+
+  RESERVE_SETTLED_CASH_USD: z.coerce.number().min(0).default(50),
+  MIN_SIGNAL_SCORE: z.coerce.number().int().min(0).default(3),
+  MAX_CONFLICTS: z.coerce.number().int().min(0).default(0),
+
+  PROMPT_VERSION: z.string().default('v2'),
 
   LOG_LEVEL: z.string().default('info'),
 });

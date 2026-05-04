@@ -8,6 +8,13 @@ export interface RawCongressTrade {
   filerParty?: string;
   filerState?: string;
   filerCommittees?: string[];
+  /**
+   * True iff the filing is the politician's own trade. False for spouse,
+   * dependent child, blind-trust, or financial-advisor managed disclosures.
+   * Defaults to true if the upstream feed doesn't distinguish (provider must
+   * fill this honestly when the data is available).
+   */
+  filerIsPolitician?: boolean;
   symbol: string;
   transactionType: 'buy' | 'sell' | 'exchange';
   transactionDate: string; // YYYY-MM-DD

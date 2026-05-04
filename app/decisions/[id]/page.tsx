@@ -38,9 +38,11 @@ interface OrderRow {
   side: string;
   type: string;
   qty: number;
+  notional_usd: number | null;
   status: string;
   filled_avg_price: number | null;
   proposal_id: number | null;
+  decision_audit: string | null;
 }
 
 export default async function DecisionPage({ params }: { params: Promise<{ id: string }> }) {
@@ -91,8 +93,15 @@ export default async function DecisionPage({ params }: { params: Promise<{ id: s
             {p.reasoning && <div className="muted">{p.reasoning}</div>}
             {p.guardrail_reason && <div style={{ color: 'var(--warn)', fontSize: 12 }}>guardrail: {p.guardrail_reason}</div>}
             {orders.filter((o) => o.proposal_id === p.id).map((o) => (
-              <div key={o.id} className="mono" style={{ fontSize: 11, marginTop: 4 }}>
-                order: {o.type} qty={o.qty} status={o.status} {o.alpaca_order_id ? `id=${o.alpaca_order_id}` : ''}
+              <div key={o.id} style={{ marginTop: 4 }}>
+                <div className="mono" style={{ fontSize: 11 }}>
+                  order: {o.type} qty={o.qty} {o.notional_usd ? `($${o.notional_usd.toFixed(0)})` : ''} status={o.status} {o.alpaca_order_id ? `id=${o.alpaca_order_id}` : ''}
+                </div>
+                {o.decision_audit && (
+                  <div className="mono" style={{ fontSize: 11, color: 'var(--muted, #888)', marginTop: 2 }}>
+                    audit: {o.decision_audit}
+                  </div>
+                )}
               </div>
             ))}
           </div>

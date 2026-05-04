@@ -39,10 +39,12 @@ CREATE TABLE IF NOT EXISTS orders (
   side TEXT NOT NULL CHECK (side IN ('buy','sell')),
   type TEXT NOT NULL CHECK (type IN ('market','stop','stop_limit','trailing_stop','limit')),
   qty REAL NOT NULL,
+  notional_usd REAL,
   status TEXT NOT NULL,
   filled_avg_price REAL,
   submitted_at INTEGER NOT NULL,
-  filled_at INTEGER
+  filled_at INTEGER,
+  decision_audit TEXT
 );
 
 CREATE TABLE IF NOT EXISTS positions_meta (
@@ -81,12 +83,15 @@ CREATE TABLE IF NOT EXISTS congress_trades (
   filer_party TEXT,
   filer_state TEXT,
   filer_committees TEXT,
+  filer_is_politician INTEGER NOT NULL DEFAULT 1,
   symbol TEXT NOT NULL,
   transaction_type TEXT NOT NULL CHECK (transaction_type IN ('buy','sell','exchange')),
   transaction_date TEXT NOT NULL,
   disclosure_date TEXT,
   amount_min_usd REAL,
   amount_max_usd REAL,
+  committee_fit_boost INTEGER NOT NULL DEFAULT 0,
+  cluster_size INTEGER NOT NULL DEFAULT 1,
   raw_json TEXT NOT NULL,
   fetched_at INTEGER NOT NULL
 );
@@ -101,6 +106,25 @@ CREATE TABLE IF NOT EXISTS earnings_calendar (
   fetched_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS earnings_pk ON earnings_calendar(symbol, earnings_date);
+
+CREATE TABLE IF NOT EXISTS news_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  headline TEXT NOT NULL,
+  summary TEXT,
+  url TEXT,
+  source TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'unclassified' CHECK (
+    category IN ('earnings','guidance','m_and_a','regulatory','exec_change','analyst','recap','other','unclassified')
+  ),
+  published_at INTEGER NOT NULL,
+  fetched_at INTEGER NOT NULL,
+  classified_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS news_source_symbol_unique ON news_items(source_id, symbol);
+CREATE INDEX IF NOT EXISTS news_symbol_published ON news_items(symbol, published_at);
+CREATE INDEX IF NOT EXISTS news_symbol_category ON news_items(symbol, category);
 `;
 
 export function applySchema(db = getRawSqlite()) {

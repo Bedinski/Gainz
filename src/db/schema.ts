@@ -40,10 +40,12 @@ export const orders = sqliteTable('orders', {
     enum: ['market', 'stop', 'stop_limit', 'trailing_stop', 'limit'],
   }).notNull(),
   qty: real('qty').notNull(),
+  notionalUsd: real('notional_usd'),
   status: text('status').notNull(),
   filledAvgPrice: real('filled_avg_price'),
   submittedAt: integer('submitted_at', { mode: 'timestamp_ms' }).notNull(),
   filledAt: integer('filled_at', { mode: 'timestamp_ms' }),
+  decisionAudit: text('decision_audit'),
 });
 
 export const positionsMeta = sqliteTable('positions_meta', {
@@ -84,18 +86,47 @@ export const congressTrades = sqliteTable(
     filerParty: text('filer_party'),
     filerState: text('filer_state'),
     filerCommittees: text('filer_committees'),
+    filerIsPolitician: integer('filer_is_politician', { mode: 'boolean' }).notNull().default(true),
     symbol: text('symbol').notNull(),
     transactionType: text('transaction_type', { enum: ['buy', 'sell', 'exchange'] }).notNull(),
     transactionDate: text('transaction_date').notNull(), // YYYY-MM-DD
     disclosureDate: text('disclosure_date'),
     amountMinUsd: real('amount_min_usd'),
     amountMaxUsd: real('amount_max_usd'),
+    committeeFitBoost: integer('committee_fit_boost').notNull().default(0),
+    clusterSize: integer('cluster_size').notNull().default(1),
     rawJson: text('raw_json').notNull(),
     fetchedAt: integer('fetched_at', { mode: 'timestamp_ms' }).notNull(),
   },
   (t) => ({
     sourceUnique: uniqueIndex('congress_source_unique').on(t.source, t.sourceId),
     symbolDate: index('congress_symbol_date').on(t.symbol, t.transactionDate),
+  }),
+);
+
+export const newsItems = sqliteTable(
+  'news_items',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    sourceId: text('source_id').notNull(),
+    symbol: text('symbol').notNull(),
+    headline: text('headline').notNull(),
+    summary: text('summary'),
+    url: text('url'),
+    source: text('source').notNull(), // e.g. "Benzinga"
+    category: text('category', {
+      enum: ['earnings', 'guidance', 'm_and_a', 'regulatory', 'exec_change', 'analyst', 'recap', 'other', 'unclassified'],
+    })
+      .notNull()
+      .default('unclassified'),
+    publishedAt: integer('published_at', { mode: 'timestamp_ms' }).notNull(),
+    fetchedAt: integer('fetched_at', { mode: 'timestamp_ms' }).notNull(),
+    classifiedAt: integer('classified_at', { mode: 'timestamp_ms' }),
+  },
+  (t) => ({
+    pk: uniqueIndex('news_source_symbol_unique').on(t.sourceId, t.symbol),
+    symbolPub: index('news_symbol_published').on(t.symbol, t.publishedAt),
+    symbolCat: index('news_symbol_category').on(t.symbol, t.category),
   }),
 );
 

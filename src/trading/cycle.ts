@@ -3,13 +3,18 @@ import { loadConfig, type Config } from './config.js';
 import { evaluateProposal } from './guardrails.js';
 import { planManagement, type ManagedPosition } from './manage.js';
 import { daysUntilEarnings } from './earnings.js';
+import { composeDecisionAudit } from './audit.js';
 import { logger } from '../lib/logger.js';
 import type { AlpacaClient } from '../alpaca/client.js';
 import { fetchMarketSnapshot, fetchPortfolioSnapshot } from '../alpaca/market.js';
 import { executeOrder } from '../alpaca/orders.js';
 import type { ClaudeClient } from '../claude/client.js';
 import { analyze } from '../claude/analyze.js';
+import { shortlist } from '../claude/shortlist.js';
+import { debate } from '../claude/debate.js';
 import { loadCongressSignals } from '../signals/congress/query.js';
+import { loadNewsSignals } from '../signals/news/query.js';
+import { refreshAlpacaNews } from '../signals/news/alpaca.js';
 import type { TradeProposal } from './types.js';
 
 export interface CycleDeps {
@@ -17,6 +22,11 @@ export interface CycleDeps {
   alpaca: AlpacaClient;
   claude: ClaudeClient;
   now?: () => Date;
+  /**
+   * When true, runs the legacy single-stage flow (used by older tests).
+   * Default: false — use the two-stage shortlist→deep→debate path.
+   */
+  singleStage?: boolean;
 }
 
 export interface CycleResult {
@@ -28,6 +38,8 @@ export interface CycleResult {
   rejected: number;
   ordersSubmitted: number;
   managementUpgrades: number;
+  shortlistSize?: number;
+  debateSkipped?: number;
 }
 
 const SKIP_OUTPUT = (reason: string, ranAt: string): CycleResult => ({
@@ -76,8 +88,26 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
   );
   const market = await fetchMarketSnapshot(deps.alpaca, cfg.SYMBOL_ALLOWLIST);
 
-  // 4. congress
+  // settled cash for the cash-account guardrail (T+1)
+  let settledCashAvailable: number | undefined;
+  try {
+    settledCashAvailable = await deps.alpaca.getSettledCash();
+  } catch (err) {
+    logger.warn({ err: String(err) }, 'getSettledCash failed; skipping settled-cash check');
+  }
+
+  // 4. congress (filtered query already requires committee_fit OR cluster>=2)
   const congress = loadCongressSignals(cfg.SYMBOL_ALLOWLIST, cfg.CONGRESS_LOOKBACK_DAYS);
+
+  // 4b. news (refresh + load if enabled)
+  if (cfg.ALPACA_NEWS_ENABLED) {
+    try {
+      await refreshAlpacaNews({ symbols: cfg.SYMBOL_ALLOWLIST, lookbackHours: cfg.NEWS_LOOKBACK_HOURS });
+    } catch (err) {
+      logger.warn({ err: String(err) }, 'news refresh failed; using cached items only');
+    }
+  }
+  const news = loadNewsSignals(cfg.SYMBOL_ALLOWLIST, {}, cfg);
 
   // recent decisions (last 5)
   const recent = db
@@ -95,18 +125,67 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
     return `${t} → ${n} proposals`;
   });
 
-  // 5. ask Claude
-  let analyzeResult;
+  // 5. analyze: stage-1 shortlist → stage-2 deep per ticker (default), or single stage
+  let proposals: TradeProposal[] = [];
+  let rawResponse = '';
+  let model = cfg.CLAUDE_MODEL;
+  let promptTokens: number | undefined;
+  let completionTokens: number | undefined;
+  let parseError: string | undefined;
+  let shortlistSize: number | undefined;
+
   try {
-    analyzeResult = await analyze({
-      cfg,
-      claude: deps.claude,
-      portfolio,
-      market,
-      congress,
-      recentDecisionSummaries: recentSummaries,
-      nowIso: ranAt,
-    });
+    if (deps.singleStage) {
+      const r = await analyze({
+        cfg,
+        claude: deps.claude,
+        portfolio,
+        market,
+        congress,
+        news,
+        recentDecisionSummaries: recentSummaries,
+        nowIso: ranAt,
+      });
+      proposals = r.proposals;
+      rawResponse = r.rawResponse;
+      model = r.model;
+      promptTokens = r.promptTokens;
+      completionTokens = r.completionTokens;
+      parseError = r.parseError;
+    } else {
+      const stage1 = await shortlist({
+        cfg,
+        claude: deps.claude,
+        portfolio,
+        market,
+        congress,
+        news,
+        recentDecisionSummaries: recentSummaries,
+        nowIso: ranAt,
+      });
+      shortlistSize = stage1.shortlist.length;
+      rawResponse = `[shortlist] ${stage1.rawResponse}`;
+      if (stage1.parseError) parseError = stage1.parseError;
+
+      for (const symbol of stage1.shortlist) {
+        const r = await analyze({
+          cfg,
+          claude: deps.claude,
+          portfolio,
+          market,
+          congress,
+          news,
+          recentDecisionSummaries: recentSummaries,
+          nowIso: ranAt,
+          focusSymbol: symbol,
+        });
+        proposals.push(...r.proposals);
+        rawResponse += `\n\n[deep ${symbol}] ${r.rawResponse}`;
+        promptTokens = (promptTokens ?? 0) + (r.promptTokens ?? 0);
+        completionTokens = (completionTokens ?? 0) + (r.completionTokens ?? 0);
+        if (r.parseError) parseError = (parseError ?? '') + `\n[deep ${symbol}] ${r.parseError}`;
+      }
+    }
   } catch (err) {
     const msg = String(err);
     logger.error({ err: msg }, 'analyze failed');
@@ -127,14 +206,14 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
     )
     .run(
       now.getTime(),
-      analyzeResult.model,
-      analyzeResult.promptTokens ?? null,
-      analyzeResult.completionTokens ?? null,
-      analyzeResult.rawResponse,
-      JSON.stringify(analyzeResult.proposals),
+      model,
+      promptTokens ?? null,
+      completionTokens ?? null,
+      rawResponse,
+      JSON.stringify(proposals),
       JSON.stringify(market),
-      JSON.stringify(congress),
-      analyzeResult.parseError ?? null,
+      JSON.stringify({ congress, news }),
+      parseError ?? null,
     );
   const decisionId = Number(decisionInsert.lastInsertRowid);
 
@@ -142,7 +221,8 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
   let approved = 0;
   let rejected = 0;
   let ordersSubmitted = 0;
-  for (const proposal of analyzeResult.proposals) {
+  let debateSkipped = 0;
+  for (const proposal of proposals) {
     const earningsDays = daysUntilEarnings(proposal.symbol, now);
     const outcome = evaluateProposal(proposal, {
       cfg,
@@ -150,6 +230,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
       isHaltedToday: false,
       tradesToday: portfolio.tradeCountToday,
       upcomingEarningsDays: earningsDays,
+      settledCashAvailable,
     });
 
     const finalProposal: TradeProposal = outcome.clampedProposal ?? proposal;
@@ -178,6 +259,37 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
       rejected++;
       continue;
     }
+
+    // Bull/bear debate gate (buys with structured signals only).
+    if (
+      !deps.singleStage &&
+      finalProposal.side === 'buy' &&
+      finalProposal.signals
+    ) {
+      try {
+        const verdict = await debate({ claude: deps.claude, proposal: finalProposal });
+        if (verdict.decision === 'skip') {
+          db.prepare('UPDATE proposals SET guardrail_status = ?, guardrail_reason = ? WHERE id = ?').run(
+            'rejected',
+            `debate-skip: ${verdict.reason}`.slice(0, 500),
+            Number(proposalRow.lastInsertRowid),
+          );
+          rejected++;
+          debateSkipped++;
+          continue;
+        }
+      } catch (err) {
+        logger.warn({ err: String(err) }, 'debate failed; conservative fail-safe is to skip');
+        db.prepare('UPDATE proposals SET guardrail_status = ?, guardrail_reason = ? WHERE id = ?').run(
+          'rejected',
+          `debate-error: ${String(err).slice(0, 200)}`,
+          Number(proposalRow.lastInsertRowid),
+        );
+        rejected++;
+        continue;
+      }
+    }
+
     approved++;
 
     // 7. execute
@@ -187,7 +299,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
       continue;
     }
     const qty = computeQty(finalProposal, snap.latestPrice, portfolio);
-    if (qty <= 0) {
+    if (qty <= 0 && finalProposal.side === 'sell') {
       logger.warn({ proposal: finalProposal }, 'qty resolved to 0; skipping order');
       continue;
     }
@@ -202,9 +314,10 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
       cancelStopOrderId: finalProposal.side === 'sell' ? meta?.current_stop_alpaca_order_id ?? undefined : undefined,
     });
 
+    const auditStr = composeDecisionAudit(finalProposal);
     db.prepare(
-      `INSERT INTO orders (proposal_id, alpaca_order_id, parent_alpaca_order_id, symbol, side, type, qty, status, submitted_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO orders (proposal_id, alpaca_order_id, parent_alpaca_order_id, symbol, side, type, qty, notional_usd, status, submitted_at, decision_audit)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       Number(proposalRow.lastInsertRowid),
       result.alpacaOrderId ?? null,
@@ -212,9 +325,11 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
       finalProposal.symbol,
       finalProposal.side,
       finalProposal.entryType ?? (finalProposal.side === 'sell' ? 'market' : 'stop'),
-      qty,
+      result.filledQty ?? qty,
+      finalProposal.notionalUsd ?? null,
       result.status,
       now.getTime(),
+      auditStr,
     );
 
     if (result.ok) {
@@ -226,6 +341,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
           snap.latestPrice * (1 - finalProposal.stopLossPct! / 100),
           snap.latestPrice - cfg.ATR_MULT * snap.atr14,
         );
+        const recordedQty = result.filledQty ?? qty;
         db.prepare(
           `INSERT INTO positions_meta (symbol, opened_at, entry_price, qty, atr_at_entry, current_stop_alpaca_order_id, current_stop_type, current_stop_price, trailing_stop_pct, highest_price_seen)
            VALUES (?, ?, ?, ?, ?, ?, 'fixed', ?, ?, ?)
@@ -237,8 +353,8 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
         ).run(
           finalProposal.symbol,
           now.getTime(),
-          snap.latestPrice,
-          qty,
+          result.filledAvgPrice ?? snap.latestPrice,
+          recordedQty,
           snap.atr14,
           result.parentAlpacaOrderId ?? result.alpacaOrderId,
           fixedStop,
@@ -260,11 +376,13 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
   return {
     ranAt,
     decisionId,
-    proposals: analyzeResult.proposals.length,
+    proposals: proposals.length,
     approved,
     rejected,
     ordersSubmitted,
     managementUpgrades,
+    shortlistSize,
+    debateSkipped,
   };
 }
 
@@ -347,12 +465,18 @@ function ensureDailyState(today: string) {
   db.prepare('INSERT OR IGNORE INTO daily_state (date) VALUES (?)').run(today);
 }
 
-function computeQty(p: TradeProposal, price: number, portfolio: { positions: Array<{ symbol: string; qty: number }> }): number {
+function computeQty(
+  p: TradeProposal,
+  price: number,
+  portfolio: { positions: Array<{ symbol: string; qty: number }> },
+): number {
   if (p.side === 'sell') {
     const pos = portfolio.positions.find((x) => x.symbol === p.symbol);
     return pos?.qty ?? 0;
   }
-  if (p.qty !== undefined) return Math.floor(p.qty);
+  if (p.qty !== undefined) return p.qty;
+  // Notional path: orders.ts handles fractional via submitNotionalBracket. We
+  // pass the floor as a fallback for the legacy submitBracket path.
   if (p.notionalUsd !== undefined && price > 0) return Math.max(0, Math.floor(p.notionalUsd / price));
   return 0;
 }
