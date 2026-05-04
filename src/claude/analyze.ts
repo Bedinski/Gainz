@@ -24,6 +24,8 @@ export interface AnalyzeArgs {
    * Otherwise the full allowlist scope is used (legacy single-stage path).
    */
   focusSymbol?: string;
+  /** Pre-formatted broad-index drawdown summary lines (iter3). */
+  marketStateLines?: string[];
 }
 
 export interface AnalyzeResult {
@@ -46,6 +48,7 @@ export async function analyze({
   recentDecisionSummaries,
   nowIso = new Date().toISOString(),
   focusSymbol,
+  marketStateLines,
 }: AnalyzeArgs): Promise<AnalyzeResult> {
   const userPrompt = buildUserPrompt({
     cfg,
@@ -56,6 +59,7 @@ export async function analyze({
     recentDecisionSummaries,
     nowIso,
     focusSymbol,
+    marketStateLines,
   });
 
   const response = await claude.complete({ systemPrompt: SYSTEM_PROMPT_STABLE, userPrompt });

@@ -19,6 +19,18 @@ export interface GuardrailContext {
    * skips the check (margin accounts, paper without the cash-account flag).
    */
   settledCashAvailable?: number;
+  /**
+   * Which strategy is dispatching this proposal. Drives per-strategy budget
+   * enforcement: 'momentum' uses MAX_POSITION_USD; 'dip_recovery' uses
+   * DIP_BUDGET_USD. Defaults to 'momentum' for backwards compat.
+   */
+  strategyTag?: 'momentum' | 'dip_recovery';
+  /**
+   * Existing exposure (USD) within the *same* strategy bucket, used to
+   * prevent dip plays from doubling up. If undefined the guardrail computes
+   * exposure across all positions (legacy behavior).
+   */
+  strategyExistingExposureUsd?: number;
 }
 
 /**
@@ -124,16 +136,26 @@ export function evaluateProposal(
     didClamp = true;
   }
 
-  // Position-size cap (existing exposure + this order).
+  // Position-size cap (existing exposure + this order). Strategy-aware:
+  // momentum uses MAX_POSITION_USD per-symbol; dip_recovery uses DIP_BUDGET_USD
+  // as a strategy-wide cap (existing exposure passed in by the caller).
   if (proposal.side === 'buy' && clamped.notionalUsd !== undefined) {
-    const existingExposure = pos ? pos.qty * pos.currentPrice : 0;
+    const strategyTag = ctx.strategyTag ?? 'momentum';
+    const isDip = strategyTag === 'dip_recovery';
+    const existingExposure = isDip
+      ? ctx.strategyExistingExposureUsd ?? 0
+      : pos
+        ? pos.qty * pos.currentPrice
+        : 0;
+    const cap = isDip ? cfg.DIP_BUDGET_USD : cfg.MAX_POSITION_USD;
+    const capName = isDip ? 'DIP_BUDGET_USD' : 'MAX_POSITION_USD';
     const projected = existingExposure + clamped.notionalUsd;
-    if (projected > cfg.MAX_POSITION_USD) {
-      const room = Math.max(0, cfg.MAX_POSITION_USD - existingExposure);
+    if (projected > cap) {
+      const room = Math.max(0, cap - existingExposure);
       if (room <= 0) {
         return {
           status: 'rejected',
-          reason: `position cap reached: existing=${existingExposure.toFixed(0)} >= MAX_POSITION_USD=${cfg.MAX_POSITION_USD}`,
+          reason: `${strategyTag} budget reached: existing=${existingExposure.toFixed(0)} >= ${capName}=${cap}`,
         };
       }
       clamped.notionalUsd = room;

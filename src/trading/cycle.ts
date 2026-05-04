@@ -15,7 +15,15 @@ import { debate } from '../claude/debate.js';
 import { loadCongressSignals } from '../signals/congress/query.js';
 import { loadNewsSignals } from '../signals/news/query.js';
 import { refreshAlpacaNews } from '../signals/news/alpaca.js';
-import type { TradeProposal } from './types.js';
+import {
+  computeDrawdown,
+  formatDrawdownLine,
+  loadActiveDipEvents,
+  updateDipEvents,
+} from '../strategies/dip-recovery/detector.js';
+import { analyzeDip } from '../strategies/dip-recovery/analyze.js';
+import { runDipExits } from '../strategies/dip-recovery/exit.js';
+import type { DipEntryProposal, TradeProposal } from './types.js';
 
 export interface CycleDeps {
   cfg?: Config;
@@ -40,6 +48,13 @@ export interface CycleResult {
   managementUpgrades: number;
   shortlistSize?: number;
   debateSkipped?: number;
+  // iter3 dip strategy
+  dipEventsActive?: number;
+  dipEventsInserted?: number;
+  dipEventsRecovered?: number;
+  dipEventsExpired?: number;
+  dipEntries?: number;
+  dipExits?: number;
 }
 
 const SKIP_OUTPUT = (reason: string, ranAt: string): CycleResult => ({
@@ -86,7 +101,15 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
     daily?.realized_pnl ?? 0,
     daily?.trade_count ?? 0,
   );
-  const market = await fetchMarketSnapshot(deps.alpaca, cfg.SYMBOL_ALLOWLIST);
+  // Fetch market data for the allowlist plus any dip-strategy symbols (typically
+  // SPY/QQQ). Dedup so a symbol that lives in both lists is fetched once.
+  const marketSymbols = Array.from(
+    new Set([
+      ...cfg.SYMBOL_ALLOWLIST.map((s) => s.toUpperCase()),
+      ...(cfg.DIP_STRATEGY_ENABLED ? cfg.DIP_SYMBOLS.map((s) => s.toUpperCase()) : []),
+    ]),
+  );
+  const market = await fetchMarketSnapshot(deps.alpaca, marketSymbols);
 
   // settled cash for the cash-account guardrail (T+1)
   let settledCashAvailable: number | undefined;
@@ -99,15 +122,46 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
   // 4. congress (filtered query already requires committee_fit OR cluster>=2)
   const congress = loadCongressSignals(cfg.SYMBOL_ALLOWLIST, cfg.CONGRESS_LOOKBACK_DAYS);
 
-  // 4b. news (refresh + load if enabled)
+  // 4b. news (refresh + load if enabled). News pull covers allowlist + dip
+  // symbols so political_shock items can gate dip detection.
+  const newsScope = Array.from(
+    new Set([
+      ...cfg.SYMBOL_ALLOWLIST,
+      ...(cfg.DIP_STRATEGY_ENABLED ? cfg.DIP_SYMBOLS : []),
+    ]),
+  );
   if (cfg.ALPACA_NEWS_ENABLED) {
     try {
-      await refreshAlpacaNews({ symbols: cfg.SYMBOL_ALLOWLIST, lookbackHours: cfg.NEWS_LOOKBACK_HOURS });
+      await refreshAlpacaNews({ symbols: newsScope, lookbackHours: cfg.NEWS_LOOKBACK_HOURS });
     } catch (err) {
       logger.warn({ err: String(err) }, 'news refresh failed; using cached items only');
     }
   }
-  const news = loadNewsSignals(cfg.SYMBOL_ALLOWLIST, {}, cfg);
+  const news = loadNewsSignals(newsScope, {}, cfg);
+
+  // 4c. dip strategy: lifecycle + market-state lines for the prompt.
+  let marketStateLines: string[] = [];
+  let dipLifecycle: { inserted: number; updated: number; recovered: number; expired: number } = {
+    inserted: 0,
+    updated: 0,
+    recovered: 0,
+    expired: 0,
+  };
+  if (cfg.DIP_STRATEGY_ENABLED) {
+    const r = updateDipEvents({ cfg, market, news, now });
+    dipLifecycle = {
+      inserted: r.inserted.length,
+      updated: r.updated.length,
+      recovered: r.recovered.length,
+      expired: r.expired.length,
+    };
+    marketStateLines = cfg.DIP_SYMBOLS.map((sym) => {
+      const snap = market[sym];
+      if (!snap) return `${sym} drawdown: no snapshot`;
+      const dd = computeDrawdown(snap.bars, { windowDays: cfg.DIP_DETECTION_WINDOW_DAYS });
+      return formatDrawdownLine(sym, dd);
+    });
+  }
 
   // recent decisions (last 5)
   const recent = db
@@ -126,13 +180,22 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
   });
 
   // 5. analyze: stage-1 shortlist → stage-2 deep per ticker (default), or single stage
+  interface PipelineProposal {
+    proposal: TradeProposal;
+    strategyTag: 'momentum' | 'dip_recovery';
+    dipEventId?: number;
+    dipTargetPrice?: number;
+    dipTimeExitAt?: number;
+  }
   let proposals: TradeProposal[] = [];
+  let pipeline: PipelineProposal[] = [];
   let rawResponse = '';
   let model = cfg.CLAUDE_MODEL;
   let promptTokens: number | undefined;
   let completionTokens: number | undefined;
   let parseError: string | undefined;
   let shortlistSize: number | undefined;
+  let dipEntries = 0;
 
   try {
     if (deps.singleStage) {
@@ -145,6 +208,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
         news,
         recentDecisionSummaries: recentSummaries,
         nowIso: ranAt,
+        marketStateLines,
       });
       proposals = r.proposals;
       rawResponse = r.rawResponse;
@@ -162,6 +226,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
         news,
         recentDecisionSummaries: recentSummaries,
         nowIso: ranAt,
+        marketStateLines,
       });
       shortlistSize = stage1.shortlist.length;
       rawResponse = `[shortlist] ${stage1.rawResponse}`;
@@ -178,6 +243,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
           recentDecisionSummaries: recentSummaries,
           nowIso: ranAt,
           focusSymbol: symbol,
+          marketStateLines,
         });
         proposals.push(...r.proposals);
         rawResponse += `\n\n[deep ${symbol}] ${r.rawResponse}`;
@@ -196,6 +262,61 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
       );
     }
     return SKIP_OUTPUT('analyze error', ranAt);
+  }
+
+  // wrap momentum proposals into the pipeline shape
+  pipeline = proposals.map((p) => ({ proposal: p, strategyTag: 'momentum' as const }));
+
+  // 5b. dip-recovery bucket: for each active dip event whose rebound has confirmed,
+  // ask Claude (separate prompt) whether to enter. Inert when DIP_STRATEGY_ENABLED=false.
+  if (cfg.DIP_STRATEGY_ENABLED) {
+    const activeEvents = loadActiveDipEvents(cfg.DIP_SYMBOLS).filter((e) => e.status === 'active');
+    for (const event of activeEvents) {
+      const snap = market[event.symbol];
+      if (!snap) continue;
+      const dd = computeDrawdown(snap.bars, { windowDays: cfg.DIP_DETECTION_WINDOW_DAYS });
+      if (!dd) continue;
+      if (dd.reboundBars < cfg.DIP_REBOUND_CONFIRMATION_BARS) continue;
+
+      try {
+        const r = await analyzeDip({
+          cfg,
+          claude: deps.claude,
+          portfolio,
+          event,
+          drawdown: dd,
+          marketEntry: snap,
+          news,
+          nowIso: ranAt,
+        });
+        rawResponse += `\n\n[dip ${event.symbol}] ${r.rawResponse}`;
+        promptTokens = (promptTokens ?? 0) + (r.promptTokens ?? 0);
+        completionTokens = (completionTokens ?? 0) + (r.completionTokens ?? 0);
+        if (r.parseError) parseError = (parseError ?? '') + `\n[dip ${event.symbol}] ${r.parseError}`;
+        if (!r.proposal || r.proposal.decision !== 'enter') continue;
+        const dipProp: TradeProposal = {
+          symbol: r.proposal.symbol,
+          side: 'buy',
+          notionalUsd: r.proposal.notionalUsd ?? cfg.DIP_BUDGET_USD,
+          entryType: 'market', // dip strategy enters at market on rebound confirmation
+          stopLossPct: cfg.STOP_LOSS_MAX_PCT, // wide stop — exit is target/time, not stop
+          trailingStopPct: cfg.TRAILING_MAX_PCT, // ditto
+          reasoning: r.proposal.reasoning,
+          signals: r.proposal.signals,
+        };
+        proposals.push(dipProp);
+        pipeline.push({
+          proposal: dipProp,
+          strategyTag: 'dip_recovery',
+          dipEventId: event.id,
+          dipTargetPrice: event.recoveryTargetPrice,
+          dipTimeExitAt: event.expiresAt,
+        });
+        dipEntries++;
+      } catch (err) {
+        logger.warn({ err: String(err), symbol: event.symbol }, 'dip analysis failed; skipping');
+      }
+    }
   }
 
   // persist decision
@@ -217,12 +338,23 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
     );
   const decisionId = Number(decisionInsert.lastInsertRowid);
 
-  // 6. guardrails per proposal
+  // 6. guardrails per proposal. Per-strategy existing exposure is computed
+  // once per cycle so all dip proposals share the same starting budget.
+  const dipExposureUsd = (
+    db
+      .prepare(
+        `SELECT COALESCE(SUM(qty * entry_price), 0) AS exposure FROM positions_meta WHERE strategy_tag = 'dip_recovery'`,
+      )
+      .get() as { exposure: number }
+  ).exposure;
+
   let approved = 0;
   let rejected = 0;
   let ordersSubmitted = 0;
   let debateSkipped = 0;
-  for (const proposal of proposals) {
+  let dipExitsCount = 0;
+  for (const item of pipeline) {
+    const proposal = item.proposal;
     const earningsDays = daysUntilEarnings(proposal.symbol, now);
     const outcome = evaluateProposal(proposal, {
       cfg,
@@ -231,6 +363,8 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
       tradesToday: portfolio.tradeCountToday,
       upcomingEarningsDays: earningsDays,
       settledCashAvailable,
+      strategyTag: item.strategyTag,
+      strategyExistingExposureUsd: item.strategyTag === 'dip_recovery' ? dipExposureUsd : undefined,
     });
 
     const finalProposal: TradeProposal = outcome.clampedProposal ?? proposal;
@@ -314,7 +448,17 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
       cancelStopOrderId: finalProposal.side === 'sell' ? meta?.current_stop_alpaca_order_id ?? undefined : undefined,
     });
 
-    const auditStr = composeDecisionAudit(finalProposal);
+    const auditStr = composeDecisionAudit(finalProposal, {
+      strategyTag: item.strategyTag,
+      dipEventId: item.dipEventId,
+      dipDrawdownPct:
+        item.strategyTag === 'dip_recovery'
+          ? loadActiveDipEvents([finalProposal.symbol]).find((e) => e.id === item.dipEventId)?.drawdownPct
+          : undefined,
+      dipTargetPrice: item.dipTargetPrice,
+      dipTimeExitAt: item.dipTimeExitAt,
+      nowMs: now.getTime(),
+    });
     db.prepare(
       `INSERT INTO orders (proposal_id, alpaca_order_id, parent_alpaca_order_id, symbol, side, type, qty, notional_usd, status, submitted_at, decision_audit)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -343,13 +487,21 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
         );
         const recordedQty = result.filledQty ?? qty;
         db.prepare(
-          `INSERT INTO positions_meta (symbol, opened_at, entry_price, qty, atr_at_entry, current_stop_alpaca_order_id, current_stop_type, current_stop_price, trailing_stop_pct, highest_price_seen)
-           VALUES (?, ?, ?, ?, ?, ?, 'fixed', ?, ?, ?)
+          `INSERT INTO positions_meta (
+             symbol, opened_at, entry_price, qty, atr_at_entry,
+             current_stop_alpaca_order_id, current_stop_type, current_stop_price,
+             trailing_stop_pct, highest_price_seen,
+             strategy_tag, target_price, time_exit_at, dip_event_id
+           )
+           VALUES (?, ?, ?, ?, ?, ?, 'fixed', ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(symbol) DO UPDATE SET
              qty = qty + excluded.qty,
              current_stop_price = MIN(current_stop_price, excluded.current_stop_price),
              trailing_stop_pct = excluded.trailing_stop_pct,
-             highest_price_seen = MAX(highest_price_seen, excluded.highest_price_seen)`,
+             highest_price_seen = MAX(highest_price_seen, excluded.highest_price_seen),
+             target_price = COALESCE(excluded.target_price, positions_meta.target_price),
+             time_exit_at = COALESCE(excluded.time_exit_at, positions_meta.time_exit_at),
+             dip_event_id = COALESCE(excluded.dip_event_id, positions_meta.dip_event_id)`,
         ).run(
           finalProposal.symbol,
           now.getTime(),
@@ -360,7 +512,18 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
           fixedStop,
           finalProposal.trailingStopPct ?? cfg.TRAILING_STOP_PCT,
           snap.latestPrice,
+          item.strategyTag,
+          item.dipTargetPrice ?? null,
+          item.dipTimeExitAt ?? null,
+          item.dipEventId ?? null,
         );
+        // Mark the dip event as 'entered' and link the position so the
+        // detector won't insert a second event for the same drawdown.
+        if (item.strategyTag === 'dip_recovery' && item.dipEventId) {
+          db.prepare(
+            `UPDATE dip_events SET status = 'entered', position_symbol = ? WHERE id = ?`,
+          ).run(finalProposal.symbol, item.dipEventId);
+        }
       }
       if (finalProposal.side === 'sell') {
         db.prepare('DELETE FROM positions_meta WHERE symbol = ?').run(finalProposal.symbol);
@@ -370,8 +533,25 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
     }
   }
 
-  // 8. manage open positions: fixed stop → trailing stop upgrade
+  // 8a. manage momentum positions: fixed stop → trailing stop upgrade.
+  //     Strategy-aware: dip_recovery positions are skipped (their exit is
+  //     deterministic via runDipExits below).
   const managementUpgrades = await manageOpenPositions(deps.alpaca, cfg, market, now);
+
+  // 8b. dip-recovery exits: target_price / time_exit_at deterministic exits.
+  if (cfg.DIP_STRATEGY_ENABLED) {
+    const exits = await runDipExits(deps.alpaca, cfg, market, now);
+    dipExitsCount = exits.length;
+  }
+
+  // count active dip events for the result summary
+  const activeDipCount = (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS c FROM dip_events WHERE status IN ('active','entered')`,
+      )
+      .get() as { c: number }
+  ).c;
 
   return {
     ranAt,
@@ -383,6 +563,12 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
     managementUpgrades,
     shortlistSize,
     debateSkipped,
+    dipEventsActive: activeDipCount,
+    dipEventsInserted: dipLifecycle.inserted,
+    dipEventsRecovered: dipLifecycle.recovered,
+    dipEventsExpired: dipLifecycle.expired,
+    dipEntries,
+    dipExits: dipExitsCount,
   };
 }
 
@@ -393,7 +579,11 @@ async function manageOpenPositions(
   now: Date,
 ): Promise<number> {
   const db = getRawSqlite();
-  const rows = db.prepare('SELECT * FROM positions_meta').all() as Array<{
+  // Strategy-aware: dip_recovery positions are exited via runDipExits and
+  // must skip the trailing-stop upgrade path.
+  const rows = db
+    .prepare(`SELECT * FROM positions_meta WHERE strategy_tag = 'momentum' OR strategy_tag IS NULL`)
+    .all() as Array<{
     symbol: string;
     entry_price: number;
     qty: number;

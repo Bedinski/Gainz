@@ -57,16 +57,39 @@ CREATE TABLE IF NOT EXISTS positions_meta (
   current_stop_type TEXT NOT NULL CHECK (current_stop_type IN ('fixed','trailing')),
   current_stop_price REAL,
   trailing_stop_pct REAL,
-  highest_price_seen REAL NOT NULL
+  highest_price_seen REAL NOT NULL,
+  strategy_tag TEXT NOT NULL DEFAULT 'momentum' CHECK (strategy_tag IN ('momentum','dip_recovery')),
+  target_price REAL,
+  time_exit_at INTEGER,
+  dip_event_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS daily_state (
   date TEXT PRIMARY KEY,
   realized_pnl REAL NOT NULL DEFAULT 0,
+  dip_realized_pnl REAL NOT NULL DEFAULT 0,
   trade_count INTEGER NOT NULL DEFAULT 0,
   halted INTEGER NOT NULL DEFAULT 0,
   halt_reason TEXT
 );
+
+CREATE TABLE IF NOT EXISTS dip_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol TEXT NOT NULL,
+  detected_at INTEGER NOT NULL,
+  peak_price REAL NOT NULL,
+  peak_date TEXT NOT NULL,
+  trough_price REAL NOT NULL,
+  trough_date TEXT NOT NULL,
+  drawdown_pct REAL NOT NULL,
+  recovery_target_price REAL NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('active','entered','recovered','expired','failed')),
+  expires_at INTEGER NOT NULL,
+  associated_news_ids TEXT,
+  position_symbol TEXT,
+  notes TEXT
+);
+CREATE INDEX IF NOT EXISTS dip_events_status ON dip_events(status, symbol);
 
 CREATE TABLE IF NOT EXISTS bot_state (
   id INTEGER PRIMARY KEY,
@@ -116,7 +139,7 @@ CREATE TABLE IF NOT EXISTS news_items (
   url TEXT,
   source TEXT NOT NULL,
   category TEXT NOT NULL DEFAULT 'unclassified' CHECK (
-    category IN ('earnings','guidance','m_and_a','regulatory','exec_change','analyst','recap','other','unclassified')
+    category IN ('earnings','guidance','m_and_a','regulatory','exec_change','analyst','recap','political_shock','other','unclassified')
   ),
   published_at INTEGER NOT NULL,
   fetched_at INTEGER NOT NULL,
@@ -127,6 +150,30 @@ CREATE INDEX IF NOT EXISTS news_symbol_published ON news_items(symbol, published
 CREATE INDEX IF NOT EXISTS news_symbol_category ON news_items(symbol, category);
 `;
 
+/**
+ * Idempotent ALTER TABLE statements for adding columns to tables created in
+ * previous iterations. SQLite has no `ADD COLUMN IF NOT EXISTS`, so we run
+ * each one and swallow the "duplicate column name" error. New databases get
+ * these columns from CREATE TABLE; existing databases pick them up here.
+ */
+const ADDITIVE_MIGRATIONS: string[] = [
+  // iter3: positions_meta strategy fields
+  `ALTER TABLE positions_meta ADD COLUMN strategy_tag TEXT NOT NULL DEFAULT 'momentum'`,
+  `ALTER TABLE positions_meta ADD COLUMN target_price REAL`,
+  `ALTER TABLE positions_meta ADD COLUMN time_exit_at INTEGER`,
+  `ALTER TABLE positions_meta ADD COLUMN dip_event_id INTEGER`,
+  // iter3: daily_state dip P&L bucket
+  `ALTER TABLE daily_state ADD COLUMN dip_realized_pnl REAL NOT NULL DEFAULT 0`,
+];
+
 export function applySchema(db = getRawSqlite()) {
   db.exec(SCHEMA_SQL);
+  for (const stmt of ADDITIVE_MIGRATIONS) {
+    try {
+      db.exec(stmt);
+    } catch (err) {
+      const msg = String(err);
+      if (!/duplicate column name/i.test(msg)) throw err;
+    }
+  }
 }

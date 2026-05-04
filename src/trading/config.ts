@@ -80,9 +80,22 @@ const envSchema = z.object({
   NEWS_MAX_ITEMS_PER_SYMBOL: z.coerce.number().int().positive().default(3),
   NEWS_CATEGORIES_ALLOWED: z
     .string()
-    .default('earnings,guidance,m_and_a,regulatory,exec_change')
+    .default('earnings,guidance,m_and_a,regulatory,exec_change,political_shock')
     .transform((s) => s.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean)),
   NEWS_CLASSIFIER_MODEL: z.string().default('claude-haiku-4-5-20251001'),
+
+  DIP_STRATEGY_ENABLED: boolFromEnv.default(false),
+  DIP_DRAWDOWN_THRESHOLD_PCT: z.coerce.number().positive().default(4),
+  DIP_DETECTION_WINDOW_DAYS: z.coerce.number().int().positive().default(5),
+  DIP_RECOVERY_WINDOW_DAYS: z.coerce.number().int().positive().default(14),
+  DIP_TARGET_RECOVERY_PCT: z.coerce.number().positive().max(1).default(0.8),
+  DIP_REQUIRES_POLITICAL_NEWS: boolFromEnv.default(true),
+  DIP_BUDGET_USD: z.coerce.number().positive().default(800),
+  DIP_REBOUND_CONFIRMATION_BARS: z.coerce.number().int().min(1).default(2),
+  DIP_SYMBOLS: z
+    .string()
+    .default('SPY,QQQ')
+    .transform((s) => s.split(',').map((x) => x.trim().toUpperCase()).filter(Boolean)),
 
   RESERVE_SETTLED_CASH_USD: z.coerce.number().min(0).default(50),
   MIN_SIGNAL_SCORE: z.coerce.number().int().min(0).default(3),

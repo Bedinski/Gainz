@@ -37,6 +37,18 @@ describe('news heuristic classifier', () => {
   it('tags regulatory news', () => {
     expect(heuristicClassify({ headline: 'SEC investigation into Tesla disclosure practices' })).toBe('regulatory');
   });
+  it('tags political_shock for tariff headlines (BEFORE regulatory)', () => {
+    expect(heuristicClassify({ headline: 'White House announces 25% tariff on EU autos' })).toBe('political_shock');
+  });
+  it('tags political_shock for executive orders', () => {
+    expect(heuristicClassify({ headline: 'Trump signs executive order pausing China tariffs' })).toBe('political_shock');
+  });
+  it('tags political_shock for sanctions', () => {
+    expect(heuristicClassify({ headline: 'Treasury imposes new sanctions on Russian banks' })).toBe('political_shock');
+  });
+  it('tags political_shock for FOMC / rate decisions', () => {
+    expect(heuristicClassify({ headline: 'FOMC holds rates steady; rate decision dovish' })).toBe('political_shock');
+  });
   it('tags executive changes', () => {
     expect(heuristicClassify({ headline: 'Acme appoints new CEO after sudden resignation' })).toBe('exec_change');
   });

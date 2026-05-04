@@ -27,13 +27,32 @@ interface PositionMetaRow {
   current_stop_type: string;
   current_stop_price: number | null;
   highest_price_seen: number;
+  strategy_tag: string;
+  target_price: number | null;
+  time_exit_at: number | null;
+  dip_event_id: number | null;
 }
 
 interface DailyRow {
   realized_pnl: number;
+  dip_realized_pnl: number;
   trade_count: number;
   halted: number;
   halt_reason: string | null;
+}
+
+interface DipEventRow {
+  id: number;
+  symbol: string;
+  detected_at: number;
+  peak_price: number;
+  trough_price: number;
+  drawdown_pct: number;
+  recovery_target_price: number;
+  status: 'active' | 'entered' | 'recovered' | 'expired' | 'failed';
+  expires_at: number;
+  position_symbol: string | null;
+  notes: string | null;
 }
 
 export default function DashboardPage() {
@@ -44,8 +63,21 @@ export default function DashboardPage() {
 
   const today = new Date().toISOString().slice(0, 10);
   const daily = db
-    .prepare('SELECT realized_pnl, trade_count, halted, halt_reason FROM daily_state WHERE date = ?')
+    .prepare(
+      'SELECT realized_pnl, dip_realized_pnl, trade_count, halted, halt_reason FROM daily_state WHERE date = ?',
+    )
     .get(today) as DailyRow | undefined;
+
+  const dipEvents = db
+    .prepare(
+      `SELECT id, symbol, detected_at, peak_price, trough_price, drawdown_pct,
+              recovery_target_price, status, expires_at, position_symbol, notes
+       FROM dip_events
+       WHERE status IN ('active','entered')
+       ORDER BY detected_at DESC
+       LIMIT 10`,
+    )
+    .all() as DipEventRow[];
 
   const decisions = db
     .prepare(
@@ -101,6 +133,58 @@ export default function DashboardPage() {
         </div>
       </section>
 
+      {cfg.DIP_STRATEGY_ENABLED && (
+        <section className="card">
+          <h2>Active dip events ({dipEvents.length})</h2>
+          <p className="muted" style={{ fontSize: 12 }}>
+            TACO-trade dip-recovery. Dip realized P&amp;L today: ${(daily?.dip_realized_pnl ?? 0).toFixed(2)}.
+          </p>
+          {dipEvents.length === 0 ? (
+            <p className="muted">no active dip events</p>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>id</th>
+                  <th>symbol</th>
+                  <th>detected</th>
+                  <th>peak → trough</th>
+                  <th>drawdown</th>
+                  <th>target</th>
+                  <th>bailout</th>
+                  <th>status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dipEvents.map((e) => {
+                  const daysToExpiry = Math.max(0, Math.round((e.expires_at - Date.now()) / 86_400_000));
+                  return (
+                    <tr key={e.id}>
+                      <td className="mono">#{e.id}</td>
+                      <td className="mono">{e.symbol}</td>
+                      <td className="mono" style={{ fontSize: 11 }}>
+                        {new Date(e.detected_at).toISOString().slice(0, 10)}
+                      </td>
+                      <td className="mono" style={{ fontSize: 11 }}>
+                        ${e.peak_price.toFixed(2)} → ${e.trough_price.toFixed(2)}
+                      </td>
+                      <td>-{e.drawdown_pct.toFixed(1)}%</td>
+                      <td>${e.recovery_target_price.toFixed(2)}</td>
+                      <td>{daysToExpiry}d</td>
+                      <td>
+                        <span className={`badge badge-${e.status === 'entered' ? 'approved' : 'clamped'}`}>
+                          {e.status}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </section>
+      )}
+
       <section className="card">
         <h2>Open positions ({positions.length})</h2>
         {positions.length === 0 ? (
@@ -110,22 +194,34 @@ export default function DashboardPage() {
             <thead>
               <tr>
                 <th>symbol</th>
+                <th>strategy</th>
                 <th>qty</th>
                 <th>entry</th>
                 <th>peak</th>
-                <th>stop type</th>
-                <th>stop price</th>
+                <th>stop / target</th>
               </tr>
             </thead>
             <tbody>
               {positions.map((p) => (
                 <tr key={p.symbol}>
                   <td className="mono">{p.symbol}</td>
+                  <td>
+                    <span className={`badge badge-${p.strategy_tag === 'dip_recovery' ? 'clamped' : 'approved'}`}>
+                      {p.strategy_tag ?? 'momentum'}
+                    </span>
+                  </td>
                   <td>{p.qty}</td>
                   <td>${p.entry_price.toFixed(2)}</td>
                   <td>${p.highest_price_seen.toFixed(2)}</td>
-                  <td>{p.current_stop_type}</td>
-                  <td>{p.current_stop_price !== null ? `$${p.current_stop_price.toFixed(2)}` : 'trailing'}</td>
+                  <td className="mono" style={{ fontSize: 11 }}>
+                    {p.strategy_tag === 'dip_recovery' && p.target_price !== null
+                      ? `target $${p.target_price.toFixed(2)}`
+                      : p.current_stop_type === 'trailing'
+                        ? 'trailing'
+                        : p.current_stop_price !== null
+                          ? `stop $${p.current_stop_price.toFixed(2)}`
+                          : '—'}
+                  </td>
                 </tr>
               ))}
             </tbody>

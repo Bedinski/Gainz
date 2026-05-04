@@ -83,11 +83,50 @@ export interface NewsSignalItem {
   summary?: string;
   url?: string;
   source: string;
-  category: 'earnings' | 'guidance' | 'm_and_a' | 'regulatory' | 'exec_change' | 'analyst' | 'recap' | 'other' | 'unclassified';
+  category:
+    | 'earnings'
+    | 'guidance'
+    | 'm_and_a'
+    | 'regulatory'
+    | 'exec_change'
+    | 'analyst'
+    | 'recap'
+    | 'political_shock'
+    | 'other'
+    | 'unclassified';
   publishedAt: number;
 }
 
 export type NewsSignals = Record<string, NewsSignalItem[]>;
+
+export type StrategyTag = 'momentum' | 'dip_recovery';
+
+export type DipEventStatus = 'active' | 'entered' | 'recovered' | 'expired' | 'failed';
+
+export interface DipEvent {
+  id: number;
+  symbol: string; // 'SPY' | 'QQQ' typically
+  detectedAt: number;
+  peakPrice: number;
+  peakDate: string;
+  troughPrice: number;
+  troughDate: string;
+  drawdownPct: number; // peak-to-trough, positive number (e.g. 7.1 means -7.1%)
+  recoveryTargetPrice: number;
+  status: DipEventStatus;
+  expiresAt: number;
+  associatedNewsIds?: number[];
+  positionSymbol?: string;
+  notes?: string;
+}
+
+export interface DipEntryProposal {
+  symbol: string;
+  decision: 'enter' | 'wait';
+  notionalUsd?: number;
+  reasoning?: string;
+  signals?: ProposalSignals;
+}
 
 export type CongressSignals = Record<string, CongressTradeSignal[]>;
 

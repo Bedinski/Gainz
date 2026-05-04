@@ -18,6 +18,7 @@ export interface ShortlistArgs {
   news?: NewsSignals;
   recentDecisionSummaries: string[];
   nowIso: string;
+  marketStateLines?: string[];
 }
 
 export interface ShortlistResult {
@@ -40,6 +41,7 @@ export async function shortlist({
   news,
   recentDecisionSummaries,
   nowIso,
+  marketStateLines,
 }: ShortlistArgs): Promise<ShortlistResult> {
   const userPrompt = buildUserPrompt({
     cfg,
@@ -49,6 +51,7 @@ export async function shortlist({
     news,
     recentDecisionSummaries,
     nowIso,
+    marketStateLines,
   });
   const response = await claude.complete({
     systemPrompt: SYSTEM_PROMPT_SHORTLIST,

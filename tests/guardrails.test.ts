@@ -141,7 +141,7 @@ describe('guardrails', () => {
       },
     );
     expect(out.status).toBe('rejected');
-    expect(out.reason).toContain('position cap reached');
+    expect(out.reason).toContain('MAX_POSITION_USD');
   });
 
   it('rejects when daily-loss kill switch tripped', () => {

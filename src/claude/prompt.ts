@@ -139,6 +139,11 @@ export interface BuildUserPromptArgs {
    * Used by stage-2 deep analysis on shortlisted tickers.
    */
   focusSymbol?: string;
+  /**
+   * Pre-formatted "Market state" lines surfacing broad-index drawdowns
+   * (e.g. SPY/QQQ peak-to-trough). Empty array → block is omitted.
+   */
+  marketStateLines?: string[];
 }
 
 /**
@@ -156,6 +161,7 @@ export function buildUserPrompt({
   recentDecisionSummaries,
   nowIso,
   focusSymbol,
+  marketStateLines,
 }: BuildUserPromptArgs): string {
   const focusFilter = focusSymbol?.toUpperCase();
   const inFocus = (s: string) => !focusFilter || s.toUpperCase() === focusFilter;
@@ -259,6 +265,10 @@ export function buildUserPrompt({
     '=== Market snapshot ===',
     marketBlock || '(no symbols in scope)',
     '',
+    marketStateLines && marketStateLines.length > 0
+      ? '=== Market state (broad-index drawdowns) ===\n' + marketStateLines.map((l) => `  ${l}`).join('\n')
+      : null,
+    marketStateLines && marketStateLines.length > 0 ? '' : null,
     '=== Guardrail envelope ===',
     envelopeBlock,
     '',

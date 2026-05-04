@@ -59,15 +59,51 @@ export const positionsMeta = sqliteTable('positions_meta', {
   currentStopPrice: real('current_stop_price'),
   trailingStopPct: real('trailing_stop_pct'),
   highestPriceSeen: real('highest_price_seen').notNull(),
+  // iter3: which strategy opened this position. Drives exit dispatch.
+  strategyTag: text('strategy_tag', { enum: ['momentum', 'dip_recovery'] })
+    .notNull()
+    .default('momentum'),
+  // iter3: target-based exit (dip strategy populates; momentum leaves null).
+  targetPrice: real('target_price'),
+  // iter3: bailout deadline (ms). Dip strategy populates; momentum leaves null.
+  timeExitAt: integer('time_exit_at', { mode: 'timestamp_ms' }),
+  dipEventId: integer('dip_event_id'),
 });
 
 export const dailyState = sqliteTable('daily_state', {
   date: text('date').primaryKey(), // YYYY-MM-DD in CRON_TZ
   realizedPnl: real('realized_pnl').notNull().default(0),
+  // iter3: realized P&L from dip-recovery strategy only (subset of realizedPnl)
+  dipRealizedPnl: real('dip_realized_pnl').notNull().default(0),
   tradeCount: integer('trade_count').notNull().default(0),
   halted: integer('halted', { mode: 'boolean' }).notNull().default(false),
   haltReason: text('halt_reason'),
 });
+
+export const dipEvents = sqliteTable(
+  'dip_events',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    symbol: text('symbol').notNull(),
+    detectedAt: integer('detected_at', { mode: 'timestamp_ms' }).notNull(),
+    peakPrice: real('peak_price').notNull(),
+    peakDate: text('peak_date').notNull(),
+    troughPrice: real('trough_price').notNull(),
+    troughDate: text('trough_date').notNull(),
+    drawdownPct: real('drawdown_pct').notNull(),
+    recoveryTargetPrice: real('recovery_target_price').notNull(),
+    status: text('status', {
+      enum: ['active', 'entered', 'recovered', 'expired', 'failed'],
+    }).notNull(),
+    expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
+    associatedNewsIds: text('associated_news_ids'), // JSON array of news_items.id
+    positionSymbol: text('position_symbol'), // FK-by-convention to positions_meta.symbol
+    notes: text('notes'),
+  },
+  (t) => ({
+    statusSym: index('dip_events_status').on(t.status, t.symbol),
+  }),
+);
 
 export const botState = sqliteTable('bot_state', {
   id: integer('id').primaryKey(), // singleton row, id=1
@@ -115,7 +151,18 @@ export const newsItems = sqliteTable(
     url: text('url'),
     source: text('source').notNull(), // e.g. "Benzinga"
     category: text('category', {
-      enum: ['earnings', 'guidance', 'm_and_a', 'regulatory', 'exec_change', 'analyst', 'recap', 'other', 'unclassified'],
+      enum: [
+        'earnings',
+        'guidance',
+        'm_and_a',
+        'regulatory',
+        'exec_change',
+        'analyst',
+        'recap',
+        'political_shock',
+        'other',
+        'unclassified',
+      ],
     })
       .notNull()
       .default('unclassified'),

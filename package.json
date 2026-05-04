@@ -17,6 +17,7 @@
     "db:migrate": "tsx scripts/migrate.ts",
     "simulate": "tsx scripts/simulate.ts",
     "replay": "tsx scripts/replay.ts",
+    "backtest": "tsx scripts/backtest.ts",
     "signals:refresh": "tsx scripts/refresh-signals.ts"
   },
   "dependencies": {

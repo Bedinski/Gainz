@@ -8,6 +8,7 @@ export type NewsCategory =
   | 'exec_change'
   | 'analyst'
   | 'recap'
+  | 'political_shock'
   | 'other';
 
 const ALL_CATEGORIES: NewsCategory[] = [
@@ -18,6 +19,7 @@ const ALL_CATEGORIES: NewsCategory[] = [
   'exec_change',
   'analyst',
   'recap',
+  'political_shock',
   'other',
 ];
 
@@ -25,9 +27,18 @@ const ALL_CATEGORIES: NewsCategory[] = [
  * Heuristic fallback classifier. Used when Claude is unavailable (tests,
  * offline, classifier disabled). Catches the most common patterns without
  * pretending to be smart.
+ *
+ * Order matters: political_shock checks BEFORE regulatory so a "tariff"
+ * headline doesn't get caught by the regulatory bucket.
  */
 export function heuristicClassify(input: { headline: string; summary?: string }): NewsCategory {
   const text = `${input.headline} ${input.summary ?? ''}`.toLowerCase();
+  if (
+    /\btariff|trade war|executive order|sanction|administration|white house|presidential|truth social|rate decision|federal reserve commentary|fomc\b/.test(
+      text,
+    )
+  )
+    return 'political_shock';
   if (/\bearnings\b|q[1-4]\b|beats|misses|reports.*profit|reports.*loss|eps\b/.test(text)) return 'earnings';
   if (/guidance|forecast|outlook|raises.*estimates|cuts.*estimates|reaffirms/.test(text)) return 'guidance';
   if (/acquir(es|ed|ing|ition)|merger|takeover|buyout|to buy\b|deal worth/.test(text)) return 'm_and_a';
@@ -75,10 +86,11 @@ async function classifyWithClaude(
   const { query } = await import('@anthropic-ai/claude-agent-sdk');
   const systemPrompt = `Classify a financial news headline into exactly one category.
 Categories:
+- political_shock: tariffs, trade war, executive orders, sanctions, administration commentary, Fed rate decisions
 - earnings: Q-period results, EPS, beat/miss
 - guidance: forward outlook, forecast changes
 - m_and_a: acquisitions, mergers, deals
-- regulatory: SEC/FDA/DOJ actions, lawsuits, antitrust
+- regulatory: SEC/FDA/DOJ actions, lawsuits, antitrust (NOT broad political/policy headlines — those are political_shock)
 - exec_change: CEO/CFO/key executive changes
 - analyst: rating changes, price target moves
 - recap: daily move recaps, generic commentary
