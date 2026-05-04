@@ -111,6 +111,21 @@ describe('iter2 guardrails — signal score gate', () => {
   });
 });
 
+describe('config — empty-string env handling', () => {
+  it('accepts blank TAKE_PROFIT_PCT (.env leaves it empty)', () => {
+    const env = { ...baseEnv, TAKE_PROFIT_PCT: '' } as unknown as NodeJS.ProcessEnv;
+    expect(() => loadConfig(env)).not.toThrow();
+    const c = loadConfig(env);
+    expect(c.TAKE_PROFIT_PCT).toBeUndefined();
+  });
+
+  it('parses a real TAKE_PROFIT_PCT value when set', () => {
+    const env = { ...baseEnv, TAKE_PROFIT_PCT: '5' } as unknown as NodeJS.ProcessEnv;
+    const c = loadConfig(env);
+    expect(c.TAKE_PROFIT_PCT).toBe(5);
+  });
+});
+
 describe('iter2 guardrails — settled-cash check (T+1)', () => {
   it('clamps notional to settledCashAvailable - reserve', () => {
     const p: TradeProposal = {

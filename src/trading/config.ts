@@ -14,6 +14,16 @@ const boolFromEnv = z
     return /^(1|true|yes|on)$/i.test(v.trim());
   });
 
+/**
+ * Optional positive number that treats empty-string env values as absent.
+ * `z.coerce.number()` would otherwise turn "" into 0, which then fails
+ * `.positive()` — anyone leaving `TAKE_PROFIT_PCT=` blank in .env hits this.
+ */
+const optionalPositive = z.preprocess(
+  (v) => (v === '' || v === undefined || v === null ? undefined : v),
+  z.coerce.number().positive().optional(),
+);
+
 const envSchema = z.object({
   TRADING_MODE: z.enum(['paper', 'live']).default('paper'),
   LIVE_TRADING_CONFIRMED: z.string().optional(),
@@ -46,7 +56,7 @@ const envSchema = z.object({
   TRAILING_STOP_PCT: z.coerce.number().positive().default(3),
   TRAILING_MIN_PCT: z.coerce.number().positive().default(2),
   TRAILING_MAX_PCT: z.coerce.number().positive().default(8),
-  TAKE_PROFIT_PCT: z.coerce.number().positive().optional(),
+  TAKE_PROFIT_PCT: optionalPositive,
   ENTRY_TRIGGER_PCT: z.coerce.number().min(0).default(0.3),
   ENTRY_MAX_OFFSET_PCT: z.coerce.number().min(0).default(1),
   ENTRY_ORDER_TTL_MIN: z.coerce.number().int().positive().default(30),
