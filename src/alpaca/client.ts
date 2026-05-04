@@ -80,7 +80,21 @@ export interface AlpacaClient {
   getBars(symbol: string, opts: { timeframe: string; start: string; end?: string; limit?: number }): Promise<
     Array<{ t: string; o: number; h: number; l: number; c: number; v: number }>
   >;
+  /**
+   * Multi-symbol bars fetch — one HTTP call instead of N. Returns a map keyed
+   * by symbol; symbols absent from the response (no bars in window) map to [].
+   * Single source of truth: per-symbol contents are byte-identical to what
+   * `getBars(symbol, ...)` would return for the same opts.
+   */
+  getBarsBatch(symbols: string[], opts: { timeframe: string; start: string; end?: string; limit?: number }): Promise<
+    Record<string, Array<{ t: string; o: number; h: number; l: number; c: number; v: number }>>
+  >;
   getLatestQuote(symbol: string): Promise<{ ap: number; bp: number; t: string }>;
+  /**
+   * Multi-symbol latest-quote fetch — one HTTP call. Same parity contract as
+   * `getBarsBatch`: per-symbol value matches the single-symbol form.
+   */
+  getLatestQuotesBatch(symbols: string[]): Promise<Record<string, { ap: number; bp: number; t: string }>>;
 
   // Orders
   submitBracket(args: {
@@ -222,9 +236,42 @@ export function createRestClient(cfg: Config = loadConfig()): AlpacaClient {
       const data = await dataFetch(`/v2/stocks/${encodeURIComponent(symbol)}/bars?${params}`);
       return data.bars ?? [];
     },
+    async getBarsBatch(symbols, { timeframe, start, end, limit }) {
+      const out: Record<string, Array<{ t: string; o: number; h: number; l: number; c: number; v: number }>> = {};
+      if (symbols.length === 0) return out;
+      // Alpaca caps response page size, so we paginate via next_page_token.
+      let pageToken: string | undefined;
+      do {
+        const params = new URLSearchParams({ symbols: symbols.join(','), timeframe, start });
+        if (end) params.set('end', end);
+        if (limit) params.set('limit', String(limit));
+        if (pageToken) params.set('page_token', pageToken);
+        const data = await dataFetch(`/v2/stocks/bars?${params}`);
+        const bars = (data.bars ?? {}) as Record<
+          string,
+          Array<{ t: string; o: number; h: number; l: number; c: number; v: number }>
+        >;
+        for (const [sym, arr] of Object.entries(bars)) {
+          (out[sym] ??= []).push(...arr);
+        }
+        pageToken = data.next_page_token ?? undefined;
+      } while (pageToken);
+      // Ensure every requested symbol has an entry (empty array if no bars).
+      for (const sym of symbols) out[sym] ??= [];
+      return out;
+    },
     async getLatestQuote(symbol) {
       const data = await dataFetch(`/v2/stocks/${encodeURIComponent(symbol)}/quotes/latest`);
       return data.quote;
+    },
+    async getLatestQuotesBatch(symbols) {
+      const out: Record<string, { ap: number; bp: number; t: string }> = {};
+      if (symbols.length === 0) return out;
+      const params = new URLSearchParams({ symbols: symbols.join(',') });
+      const data = await dataFetch(`/v2/stocks/quotes/latest?${params}`);
+      const quotes = (data.quotes ?? {}) as Record<string, { ap: number; bp: number; t: string }>;
+      for (const sym of symbols) out[sym] = quotes[sym] ?? { ap: 0, bp: 0, t: '' };
+      return out;
     },
     async submitBracket({
       symbol,

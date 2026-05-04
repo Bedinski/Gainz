@@ -140,6 +140,9 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
   const news = loadNewsSignals(newsScope, {}, cfg);
 
   // 4c. dip strategy: lifecycle + market-state lines for the prompt.
+  // Compute drawdowns ONCE per dip symbol and reuse across the three call
+  // sites (lifecycle update, prompt market-state block, dip-entry loop). The
+  // function is pure, so sharing the result is a byte-equivalent dedupe.
   let marketStateLines: string[] = [];
   let dipLifecycle: { inserted: number; updated: number; recovered: number; expired: number } = {
     inserted: 0,
@@ -147,8 +150,15 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
     recovered: 0,
     expired: 0,
   };
+  const drawdownMap: Record<string, ReturnType<typeof computeDrawdown>> = {};
   if (cfg.DIP_STRATEGY_ENABLED) {
-    const r = updateDipEvents({ cfg, market, news, now });
+    for (const sym of cfg.DIP_SYMBOLS) {
+      const snap = market[sym];
+      drawdownMap[sym] = snap
+        ? computeDrawdown(snap.bars, { windowDays: cfg.DIP_DETECTION_WINDOW_DAYS })
+        : null;
+    }
+    const r = updateDipEvents({ cfg, market, news, now, drawdowns: drawdownMap });
     dipLifecycle = {
       inserted: r.inserted.length,
       updated: r.updated.length,
@@ -158,8 +168,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
     marketStateLines = cfg.DIP_SYMBOLS.map((sym) => {
       const snap = market[sym];
       if (!snap) return `${sym} drawdown: no snapshot`;
-      const dd = computeDrawdown(snap.bars, { windowDays: cfg.DIP_DETECTION_WINDOW_DAYS });
-      return formatDrawdownLine(sym, dd);
+      return formatDrawdownLine(sym, drawdownMap[sym] ?? null);
     });
   }
 
@@ -274,7 +283,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
     for (const event of activeEvents) {
       const snap = market[event.symbol];
       if (!snap) continue;
-      const dd = computeDrawdown(snap.bars, { windowDays: cfg.DIP_DETECTION_WINDOW_DAYS });
+      const dd = drawdownMap[event.symbol] ?? null;
       if (!dd) continue;
       if (dd.reboundBars < cfg.DIP_REBOUND_CONFIRMATION_BARS) continue;
 

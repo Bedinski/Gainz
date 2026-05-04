@@ -10,10 +10,18 @@ export async function fetchMarketSnapshot(
   const lookback = opts.lookbackDays ?? 60;
   const start = new Date(Date.now() - lookback * 24 * 60 * 60 * 1000).toISOString();
   const out: MarketSnapshot = {};
+  if (symbols.length === 0) return out;
+
+  // Batch the two data calls. The per-symbol shape downstream is identical to
+  // the previous loop — same bars, same latestPrice fallback, same ATR.
+  const [barsMap, quotesMap] = await Promise.all([
+    client.getBarsBatch(symbols, { timeframe: '1Day', start, limit: lookback }),
+    client.getLatestQuotesBatch(symbols),
+  ]);
 
   for (const symbol of symbols) {
-    const bars = await client.getBars(symbol, { timeframe: '1Day', start, limit: lookback });
-    const quote = await client.getLatestQuote(symbol);
+    const bars = barsMap[symbol] ?? [];
+    const quote = quotesMap[symbol] ?? { ap: 0, bp: 0, t: '' };
     const latestPrice = quote.ap || (bars.at(-1)?.c ?? 0);
     const atr14 = computeATR(
       bars.map((b) => ({ high: b.h, low: b.l, close: b.c })),

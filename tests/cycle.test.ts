@@ -48,7 +48,10 @@ function mockAlpaca(open = true): AlpacaClient {
     getPositions: async () => [],
     getOrders: async () => [],
     getBars: async () => bars,
+    getBarsBatch: async (symbols) => Object.fromEntries(symbols.map((s) => [s, bars])),
     getLatestQuote: async () => ({ ap: 182, bp: 181.95, t: '' }),
+    getLatestQuotesBatch: async (symbols) =>
+      Object.fromEntries(symbols.map((s) => [s, { ap: 182, bp: 181.95, t: '' }])),
     submitBracket: async () => ({ id: 'b1', status: 'accepted', legs: [{ id: 'sl1', order_class: 'bracket' }] }),
     submitNotionalBracket: async () => ({
       parentOrderId: 'p1',

@@ -175,6 +175,14 @@ export interface UpdateDipEventsArgs {
   market: Record<string, MarketSnapshotEntry>;
   news?: NewsSignals;
   now: Date;
+  /**
+   * Optional precomputed drawdown readings keyed by symbol. When supplied,
+   * `updateDipEvents` skips its internal `computeDrawdown` call and uses the
+   * caller-provided reading. This is a pure dedupe — `computeDrawdown` is
+   * deterministic, so reusing a precomputed result yields byte-identical
+   * lifecycle transitions versus letting the detector compute internally.
+   */
+  drawdowns?: Record<string, DrawdownReading | null>;
 }
 
 export interface UpdateDipEventsResult {
@@ -194,7 +202,7 @@ export interface UpdateDipEventsResult {
  * Pure DB side-effects only (no orders, no Claude). Returns a summary of state
  * transitions for logging / dashboard.
  */
-export function updateDipEvents({ cfg, market, news, now }: UpdateDipEventsArgs): UpdateDipEventsResult {
+export function updateDipEvents({ cfg, market, news, now, drawdowns }: UpdateDipEventsArgs): UpdateDipEventsResult {
   const db = getRawSqlite();
   const result: UpdateDipEventsResult = { inserted: [], updated: [], recovered: [], expired: [] };
   const nowMs = now.getTime();
@@ -205,7 +213,10 @@ export function updateDipEvents({ cfg, market, news, now }: UpdateDipEventsArgs)
       logger.warn({ symbol }, 'dip detector: no market snapshot for symbol; skipping');
       continue;
     }
-    const reading = computeDrawdown(snap.bars, { windowDays: cfg.DIP_DETECTION_WINDOW_DAYS });
+    const reading =
+      drawdowns && symbol in drawdowns
+        ? drawdowns[symbol]
+        : computeDrawdown(snap.bars, { windowDays: cfg.DIP_DETECTION_WINDOW_DAYS });
     if (!reading) continue;
 
     // 1. Existing active row?

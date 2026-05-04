@@ -34,7 +34,10 @@ function mockClient(): { client: AlpacaClient; calls: { notionalBracket?: unknow
     getPositions: async () => [],
     getOrders: async () => [],
     getBars: async () => [],
+    getBarsBatch: async (symbols) => Object.fromEntries(symbols.map((s) => [s, []])),
     getLatestQuote: async () => ({ ap: 920, bp: 919.95, t: '' }),
+    getLatestQuotesBatch: async (symbols) =>
+      Object.fromEntries(symbols.map((s) => [s, { ap: 920, bp: 919.95, t: '' }])),
     submitBracket: async (args) => {
       calls.bracket = args;
       return { id: 'parent', status: 'accepted', legs: [{ id: 'stop', order_class: 'bracket' }] };

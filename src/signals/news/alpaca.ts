@@ -130,9 +130,16 @@ export function upsertNewsItems(
 
 /**
  * Classifies all unclassified news rows with the Haiku tagger and writes the
- * category back. Bounded by `limit` to keep cycle cost predictable.
+ * category back. Bounded by `limit` to keep cycle cost predictable. Runs
+ * classifications with bounded concurrency — each row is classified in
+ * isolation (no shared state, write keyed by id), so order doesn't affect the
+ * final (id, category) tuple set.
  */
-export async function classifyUnclassified(cfg: Config, limit = 50): Promise<number> {
+export async function classifyUnclassified(
+  cfg: Config,
+  limit = 50,
+  concurrency = 5,
+): Promise<number> {
   const db = getRawSqlite();
   const rows = db
     .prepare(
@@ -146,16 +153,44 @@ export async function classifyUnclassified(cfg: Config, limit = 50): Promise<num
   const update = db.prepare(
     `UPDATE news_items SET category = ?, classified_at = ? WHERE id = ?`,
   );
-  let classified = 0;
-  for (const r of rows) {
-    let category: NewsCategory = 'other';
+  const classifyOne = async (r: { id: number; headline: string; summary: string | null }) => {
     try {
-      category = await classifyHeadline({ headline: r.headline, summary: r.summary ?? undefined }, cfg);
+      const category = await classifyHeadline(
+        { headline: r.headline, summary: r.summary ?? undefined },
+        cfg,
+      );
+      return { id: r.id, category };
     } catch (err) {
       logger.warn({ err: String(err), id: r.id }, 'news classification failed; defaulting to other');
+      return { id: r.id, category: 'other' as NewsCategory };
     }
-    update.run(category, Date.now(), r.id);
-    classified++;
-  }
-  return classified;
+  };
+  const results = await runWithConcurrency(rows, Math.max(1, concurrency), classifyOne);
+  const now = Date.now();
+  for (const { id, category } of results) update.run(category, now, id);
+  return results.length;
+}
+
+/**
+ * Bounded-concurrency mapper: runs at most `n` workers in parallel until every
+ * input is consumed. Preserves no order guarantees on completion, but the
+ * returned array maps 1:1 to the input array by index.
+ */
+async function runWithConcurrency<T, R>(
+  items: T[],
+  n: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i]!);
+    }
+  };
+  const workers = Array.from({ length: Math.min(n, items.length) }, () => worker());
+  await Promise.all(workers);
+  return out;
 }

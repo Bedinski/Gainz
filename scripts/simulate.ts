@@ -24,7 +24,10 @@ const fakeAlpaca: AlpacaClient = {
   getPositions: async () => [],
   getOrders: async () => [],
   getBars: async () => fixtureBars,
+  getBarsBatch: async (symbols) => Object.fromEntries(symbols.map((s) => [s, fixtureBars])),
   getLatestQuote: async () => ({ ap: 188, bp: 187.95, t: '' }),
+  getLatestQuotesBatch: async (symbols) =>
+    Object.fromEntries(symbols.map((s) => [s, { ap: 188, bp: 187.95, t: '' }])),
   submitBracket: async () => ({ id: 'sim-1', status: 'accepted', legs: [{ id: 'sim-sl-1', order_class: 'bracket' }] }),
   submitNotionalBracket: async () => ({
     parentOrderId: 'sim-p-1',

@@ -23,7 +23,10 @@ function mockAlpaca(): { client: AlpacaClient; sells: Array<{ symbol: string; qt
     getPositions: async () => [],
     getOrders: async () => [],
     getBars: async () => [],
+    getBarsBatch: async (symbols) => Object.fromEntries(symbols.map((s) => [s, []])),
     getLatestQuote: async () => ({ ap: 0, bp: 0, t: '' }),
+    getLatestQuotesBatch: async (symbols) =>
+      Object.fromEntries(symbols.map((s) => [s, { ap: 0, bp: 0, t: '' }])),
     submitBracket: async () => ({ id: 'b', status: 'accepted', legs: [] }),
     submitNotionalBracket: async () => ({ parentOrderId: 'p', parentStatus: 'filled' }),
     submitTrailingStop: async () => ({ id: 't', status: 'accepted' }),
