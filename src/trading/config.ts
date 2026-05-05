@@ -127,7 +127,15 @@ const envSchema = z.object({
   REGIME_RISK_OFF_REJECTS_BUYS: boolFromEnv.default(true),
   REGIME_CHOP_RISK_SCALE: z.coerce.number().positive().max(1).default(0.5),
 
-  // Multi-model debate. Each side runs on a different model; judge breaks ties.
+  // Bull/bear debate kill switch. Default true — debate runs on every buy
+  // proposal with structured signals and can veto entries that look like
+  // chasing-a-top setups. Set false to skip the debate stage and let proposals
+  // through to the order layer with only the deterministic guardrails between
+  // Claude and Alpaca. Removes a real safety layer; only flip false if you've
+  // tightened MIN_SIGNAL_SCORE / MAX_CONFLICTS to compensate.
+  DEBATE_ENABLED: boolFromEnv.default(true),
+  // Multi-model debate. When DEBATE_MULTI_MODEL_ENABLED=true (and DEBATE_ENABLED=true),
+  // each side runs on a different model and a judge model breaks ties.
   DEBATE_BULL_MODEL: z.string().default('claude-sonnet-4-6'),
   DEBATE_BEAR_MODEL: z.string().default('claude-opus-4-7'),
   DEBATE_JUDGE_MODEL: z.string().default('claude-haiku-4-5-20251001'),

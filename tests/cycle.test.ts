@@ -167,6 +167,32 @@ describe('runCycle (two-stage)', () => {
     expect(decision.error_message).toBeTruthy();
   });
 
+  it('DEBATE_ENABLED=false bypasses debate even when bear would have skipped', async () => {
+    const cfg = loadConfig({ ...env, DEBATE_ENABLED: 'false' });
+    getDb(':memory:');
+    applySchema();
+    let calls = 0;
+    const claude: ClaudeClient = {
+      complete: async () => {
+        calls++;
+        if (calls === 1) {
+          return { text: JSON.stringify({ shortlist: ['AAPL'] }), model: 'claude-sonnet-4-6' };
+        }
+        if (calls === 2) {
+          return { text: JSON.stringify({ proposals: [proposalWithSignals] }), model: 'claude-sonnet-4-6' };
+        }
+        // Would force a debate-skip if debate ran. Test asserts these calls
+        // never happen when DEBATE_ENABLED=false.
+        return { text: JSON.stringify({ decision: 'skip', rationale: 'noisy' }), model: 'claude-sonnet-4-6' };
+      },
+    };
+    const result = await runCycle({ cfg, alpaca: mockAlpaca(true), claude });
+    expect(calls).toBe(2); // shortlist + deep analysis only — no bull/bear calls
+    expect(result.debateSkipped).toBe(0);
+    expect(result.approved).toBe(1);
+    expect(result.ordersSubmitted).toBe(1); // dry-run still counts
+  });
+
   it('debate skip path rejects an otherwise-passing proposal', async () => {
     const cfg = loadConfig(env);
     getDb(':memory:');

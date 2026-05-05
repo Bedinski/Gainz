@@ -499,6 +499,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
       | undefined;
     if (
       !deps.singleStage &&
+      cfg.DEBATE_ENABLED &&
       finalProposal.side === 'buy' &&
       finalProposal.signals
     ) {
