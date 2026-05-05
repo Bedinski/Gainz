@@ -613,7 +613,19 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
       ordersSubmitted++;
       db.prepare('UPDATE daily_state SET trade_count = trade_count + 1 WHERE date = ?').run(today);
 
-      if (finalProposal.side === 'buy' && !result.dryRun && result.alpacaOrderId) {
+      // Only write a positions_meta row when the entry actually filled. A
+      // pending stop-buy (status='accepted'/'new', filledQty undefined) means
+      // we don't own the shares yet — recording the row anyway would let a
+      // future manageOpenPositions cycle see a "position", upgrade the
+      // protective stop to a trailing stop, and leave an orphan sell on
+      // Alpaca for shares the operator never owned. The row is created later
+      // by manageOpenPositions's reconcile when the fill actually appears in
+      // Alpaca's positions list.
+      const entryFilled =
+        (typeof result.filledQty === 'number' && result.filledQty > 0) ||
+        result.status === 'filled' ||
+        result.status === 'partially_filled';
+      if (finalProposal.side === 'buy' && !result.dryRun && result.alpacaOrderId && entryFilled) {
         const fixedStop = Math.min(
           snap.latestPrice * (1 - finalProposal.stopLossPct! / 100),
           snap.latestPrice - cfg.ATR_MULT * snap.atr14,
@@ -662,6 +674,20 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
       }
       if (finalProposal.side === 'sell') {
         db.prepare('DELETE FROM positions_meta WHERE symbol = ?').run(finalProposal.symbol);
+      }
+      // Diagnostic: pending stop-buy that hasn't filled. Defer positions_meta
+      // until reconcile sees the actual fill; operators sometimes see a buy
+      // proposal "approved" and then no position appear, so log the reason.
+      if (
+        finalProposal.side === 'buy' &&
+        !result.dryRun &&
+        result.alpacaOrderId &&
+        !entryFilled
+      ) {
+        logger.info(
+          { symbol: finalProposal.symbol, status: result.status, alpacaOrderId: result.alpacaOrderId },
+          'entry order accepted but not filled; positions_meta deferred until fill',
+        );
       }
     } else {
       logger.error({ result, proposal: finalProposal }, 'order failed');
@@ -741,6 +767,23 @@ async function manageOpenPositions(
   now: Date,
 ): Promise<number> {
   const db = getRawSqlite();
+
+  // Phantom-row prune: a positions_meta row that doesn't correspond to any
+  // live Alpaca position is stale (entry order canceled / never filled / hand-
+  // edited DB / etc). Acting on it would cancel-and-re-issue a trailing stop
+  // for shares we don't own — the orphan-trailing-stop bug. Cross-reference
+  // Alpaca's position list, prune mismatches, and best-effort cancel any stop
+  // order this row was tracking so it doesn't sit orphaned at the broker.
+  let livePositions: Awaited<ReturnType<AlpacaClient['getPositions']>> = [];
+  let livePositionsAvailable = false;
+  try {
+    livePositions = await alpaca.getPositions();
+    livePositionsAvailable = true;
+  } catch (err) {
+    logger.warn({ err: String(err) }, 'getPositions failed; skipping phantom-row prune this cycle');
+  }
+  const liveSymbols = new Set(livePositions.map((p) => p.symbol.toUpperCase()));
+
   // Strategy-aware: dip_recovery positions are exited via runDipExits and
   // must skip the trailing-stop upgrade path.
   const rows = db
@@ -755,9 +798,38 @@ async function manageOpenPositions(
     trailing_stop_pct: number | null;
     highest_price_seen: number;
   }>;
+
+  // Only prune when getPositions() actually returned. On failure we leave
+  // positions_meta alone — the alternative (treat the failure as "Alpaca has
+  // zero positions") would nuke every legit row.
+  if (livePositionsAvailable) {
+    for (const r of rows) {
+      if (liveSymbols.has(r.symbol.toUpperCase())) continue;
+      logger.warn(
+        { symbol: r.symbol, stopOrderId: r.current_stop_alpaca_order_id ?? null },
+        'positions_meta row has no matching Alpaca position; pruning + canceling tracked stop',
+      );
+      if (r.current_stop_alpaca_order_id) {
+        await alpaca
+          .cancelOrder(r.current_stop_alpaca_order_id)
+          .catch((err) =>
+            logger.warn(
+              { err: String(err), symbol: r.symbol, orderId: r.current_stop_alpaca_order_id },
+              'cancel orphan stop failed; operator should cancel manually',
+            ),
+          );
+      }
+      db.prepare('DELETE FROM positions_meta WHERE symbol = ?').run(r.symbol);
+    }
+  }
+
+  // Re-read after the prune so the trailing-stop loop only walks live rows.
+  const liveRows = db
+    .prepare(`SELECT * FROM positions_meta WHERE strategy_tag = 'momentum' OR strategy_tag IS NULL`)
+    .all() as typeof rows;
   let upgrades = 0;
 
-  for (const r of rows) {
+  for (const r of liveRows) {
     const snap = market[r.symbol];
     if (!snap) continue;
     const trail = r.trailing_stop_pct ?? cfg.TRAILING_STOP_PCT;

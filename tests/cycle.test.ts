@@ -193,6 +193,123 @@ describe('runCycle (two-stage)', () => {
     expect(result.ordersSubmitted).toBe(1); // dry-run still counts
   });
 
+  it('pending stop-buy (not filled) does NOT write a positions_meta row', async () => {
+    // Reproduces the orphan-trailing-stop bug: previously the cycle wrote a
+    // positions_meta row on order acceptance, even though the stop-buy hadn't
+    // triggered. A subsequent cycle then upgraded the protective stop to a
+    // trailing stop for shares the operator never owned.
+    const cfg = loadConfig({
+      ...env,
+      SAFE_MODE: 'false',
+      DEBATE_ENABLED: 'false',
+    });
+    getDb(':memory:');
+    applySchema();
+    const alpaca = mockAlpaca(true);
+    // Override the bracket submission so the parent appears accepted-but-not-
+    // filled — what real stop-buys look like in Alpaca's response.
+    alpaca.submitNotionalBracket = async () => ({
+      parentOrderId: 'p-pending',
+      parentStatus: 'accepted',
+      filledQty: undefined as unknown as number,
+      filledAvgPrice: undefined as unknown as number,
+      stopOrderId: 's-pending',
+      stopStatus: 'held',
+    });
+    let calls = 0;
+    const claude: ClaudeClient = {
+      complete: async () => {
+        calls++;
+        if (calls === 1) return { text: JSON.stringify({ shortlist: ['AAPL'] }), model: 'm' };
+        if (calls === 2) return { text: JSON.stringify({ proposals: [proposalWithSignals] }), model: 'm' };
+        return { text: JSON.stringify({ decision: 'proceed', rationale: 'ok' }), model: 'm' };
+      },
+    };
+    const result = await runCycle({ cfg, alpaca, claude });
+    expect(result.ordersSubmitted).toBe(1);
+    const db = getRawSqlite();
+    const rowCount = (db.prepare('SELECT COUNT(*) AS c FROM positions_meta WHERE symbol = ?').get('AAPL') as { c: number }).c;
+    expect(rowCount).toBe(0); // critical: no phantom row
+    const orderRow = db.prepare('SELECT status FROM orders WHERE symbol = ?').get('AAPL') as { status: string };
+    expect(orderRow.status).toBe('accepted'); // the order itself is still recorded
+  });
+
+  it('manage step prunes phantom positions_meta rows + cancels their tracked stop', async () => {
+    const cfg = loadConfig({ ...env, SAFE_MODE: 'false', DEBATE_ENABLED: 'false' });
+    getDb(':memory:');
+    applySchema();
+
+    // Pre-seed a phantom row exactly like the GOOGL bug in production.
+    const db = getRawSqlite();
+    db.prepare(
+      `INSERT INTO positions_meta (
+         symbol, opened_at, entry_price, qty, atr_at_entry,
+         current_stop_alpaca_order_id, current_stop_type, current_stop_price,
+         trailing_stop_pct, highest_price_seen, strategy_tag, sector
+       ) VALUES (?, ?, ?, ?, ?, ?, 'trailing', ?, ?, ?, ?, ?)`,
+    ).run('AAPL', Date.now(), 180, 1, 5, 'orphan-stop-id', null, 3, 180, 'momentum', 'tech');
+
+    const alpaca = mockAlpaca(true);
+    let canceledOrderId: string | undefined;
+    alpaca.cancelOrder = async (id: string) => {
+      canceledOrderId = id;
+    };
+    // getPositions returns [] (default) → phantom should be pruned + stop canceled.
+
+    // Empty shortlist so no new proposal interferes; the manage step still runs.
+    const claude: ClaudeClient = {
+      complete: async () => ({
+        text: JSON.stringify({ shortlist: [], notes: 'nothing today' }),
+        model: 'claude-sonnet-4-6',
+      }),
+    };
+
+    await runCycle({ cfg, alpaca, claude });
+
+    expect(canceledOrderId).toBe('orphan-stop-id');
+    const remaining = (db.prepare('SELECT COUNT(*) AS c FROM positions_meta WHERE symbol = ?').get('AAPL') as { c: number }).c;
+    expect(remaining).toBe(0);
+  });
+
+  it('manage step does NOT prune when getPositions fails (failure-mode safety)', async () => {
+    const cfg = loadConfig({ ...env, SAFE_MODE: 'false', DEBATE_ENABLED: 'false' });
+    getDb(':memory:');
+    applySchema();
+    const db = getRawSqlite();
+    db.prepare(
+      `INSERT INTO positions_meta (
+         symbol, opened_at, entry_price, qty, atr_at_entry,
+         current_stop_alpaca_order_id, current_stop_type, current_stop_price,
+         trailing_stop_pct, highest_price_seen, strategy_tag, sector
+       ) VALUES (?, ?, ?, ?, ?, ?, 'trailing', ?, ?, ?, ?, ?)`,
+    ).run('AAPL', Date.now(), 180, 1, 5, 'real-stop-id', null, 3, 180, 'momentum', 'tech');
+
+    const alpaca = mockAlpaca(true);
+    // First getPositions() call is fetchPortfolioSnapshot — return []. Second
+    // is the new prune step — fail. The prune must catch and continue.
+    let getPositionsCalls = 0;
+    alpaca.getPositions = async () => {
+      getPositionsCalls++;
+      if (getPositionsCalls === 1) return [];
+      throw new Error('alpaca down');
+    };
+    let canceled = false;
+    alpaca.cancelOrder = async () => {
+      canceled = true;
+    };
+    const claude: ClaudeClient = {
+      complete: async () => ({
+        text: JSON.stringify({ shortlist: [] }),
+        model: 'claude-sonnet-4-6',
+      }),
+    };
+    await runCycle({ cfg, alpaca, claude });
+    // Row preserved, stop NOT canceled — broker outage shouldn't nuke local state.
+    const stillThere = (db.prepare('SELECT COUNT(*) AS c FROM positions_meta WHERE symbol = ?').get('AAPL') as { c: number }).c;
+    expect(stillThere).toBe(1);
+    expect(canceled).toBe(false);
+  });
+
   it('debate skip path rejects an otherwise-passing proposal', async () => {
     const cfg = loadConfig(env);
     getDb(':memory:');
