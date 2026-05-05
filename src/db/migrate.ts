@@ -226,4 +226,50 @@ export function applySchema(db = getRawSqlite()) {
       if (!/duplicate column name/i.test(msg)) throw err;
     }
   }
+  rebuildNewsItemsIfStale(db);
+}
+
+/**
+ * SQLite can't ALTER a CHECK constraint in place, so when the news classifier's
+ * category vocabulary grows we have to rebuild the table. Detect the stale
+ * shape via sqlite_master and rebuild only when needed; subsequent runs are
+ * no-ops. Existing rows are preserved (no news data is critical, but losing it
+ * on every restart would be silly).
+ *
+ * Trigger: news_items.category CHECK omits 'political_shock' (added when the
+ * dip-recovery strategy needed political-headline gating).
+ */
+function rebuildNewsItemsIfStale(db: ReturnType<typeof getRawSqlite>): void {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='news_items'")
+    .get() as { sql: string } | undefined;
+  if (!row || !row.sql) return; // fresh DB — CREATE TABLE already used the new constraint
+  if (row.sql.includes("'political_shock'")) return; // already current
+  db.exec(`
+    BEGIN;
+    ALTER TABLE news_items RENAME TO news_items_old;
+    CREATE TABLE news_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_id TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      headline TEXT NOT NULL,
+      summary TEXT,
+      url TEXT,
+      source TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'unclassified' CHECK (
+        category IN ('earnings','guidance','m_and_a','regulatory','exec_change','analyst','recap','political_shock','other','unclassified')
+      ),
+      published_at INTEGER NOT NULL,
+      fetched_at INTEGER NOT NULL,
+      classified_at INTEGER
+    );
+    INSERT INTO news_items (id, source_id, symbol, headline, summary, url, source, category, published_at, fetched_at, classified_at)
+      SELECT id, source_id, symbol, headline, summary, url, source, category, published_at, fetched_at, classified_at
+      FROM news_items_old;
+    DROP TABLE news_items_old;
+    CREATE UNIQUE INDEX IF NOT EXISTS news_source_symbol_unique ON news_items(source_id, symbol);
+    CREATE INDEX IF NOT EXISTS news_symbol_published ON news_items(symbol, published_at);
+    CREATE INDEX IF NOT EXISTS news_symbol_category ON news_items(symbol, category);
+    COMMIT;
+  `);
 }
