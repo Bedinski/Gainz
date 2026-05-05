@@ -26,19 +26,24 @@ async function main() {
     'worker starting',
   );
 
-  // Trading cycle.
-  cron.schedule(
-    cfg.CRON_SCHEDULE,
-    async () => {
-      try {
-        const result = await runCycle({ cfg, alpaca, claude });
-        logger.info(result, 'cycle complete');
-      } catch (err) {
-        logger.error({ err: String(err) }, 'cycle threw');
-      }
-    },
-    { timezone: cfg.CRON_TZ },
-  );
+  // Trading cycle. Fired by cron on CRON_SCHEDULE plus once at boot so the
+  // worker doesn't sit idle for up to 15 minutes after a (re)start. The
+  // boot-time call goes through the same `runCycle` and respects all gates
+  // (bot disabled, market closed, daily halt, circuit breaker), so an
+  // out-of-hours start is a no-op that logs `skippedReason`.
+  const tradingCycle = async () => {
+    try {
+      const result = await runCycle({ cfg, alpaca, claude });
+      logger.info(result, 'cycle complete');
+    } catch (err) {
+      logger.error({ err: String(err) }, 'cycle threw');
+    }
+  };
+  cron.schedule(cfg.CRON_SCHEDULE, tradingCycle, { timezone: cfg.CRON_TZ });
+  // Fire once now so a fresh start doesn't stall behind the next 15-min tick.
+  // Awaited inline — main() returns only after the boot-time cycle settles,
+  // which keeps process startup logs in a sane order.
+  await tradingCycle();
 
   // Daily congress + earnings refresh, 3am ET.
   cron.schedule(
