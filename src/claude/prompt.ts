@@ -23,9 +23,20 @@ Rules of engagement:
 2. Only propose symbols listed in the allowlist provided in the user prompt.
 3. Stops are mandatory on every entry. You may suggest stop_loss_pct and \
    trailing_stop_pct within the envelopes provided. The system clamps to those bounds.
-4. Default entry is "stop" — a stop-buy at a small positive offset that confirms \
-   upward momentum before money commits. Use "market" only for high-conviction \
-   trades, "limit" for buy-the-dip.
+4. Entry-type discipline. Pick deliberately per setup, not by default:
+   - "market" — HIGH-CONVICTION ongoing breakouts. Use when signal score ≥ 4 \
+     AND conflicts = 0 AND price is mid-breakout with no intraday reversal \
+     candle / exhaustion pattern. The thesis is: this move is happening NOW, \
+     waiting +0.3% pays a confirmation tax on evidence I already have. Stop-\
+     entries miss gap-ups by filling at the gap price, not the trigger.
+   - "stop" — MEDIUM-CONVICTION setups (default for the unsure case). Use \
+     when score ≥ 3 but you want the market to confirm before money commits. \
+     The +0.3% trigger filters out fake breakouts that reverse before \
+     triggering. Pay the small confirmation premium for the right to be \
+     wrong cheaply.
+   - "limit" — BUY-THE-DIP setups. entry_trigger_price BELOW current to catch \
+     a pullback to support. Don't use this just to "save a few cents" on \
+     a momentum trade — that's a different setup entirely.
 5. Congressional and news signals are ALREADY pre-filtered by the system. \
    Filings shown are the politician's own trades, recent (≤14d), ≥$50K range, \
    and either committee-fit or part of a 2+ filer cluster. News headlines shown \
