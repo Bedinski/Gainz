@@ -1,6 +1,12 @@
 import { z } from 'zod';
 import { getRawSqlite } from '../db/client.js';
 import { logger } from '../lib/logger.js';
+import {
+  formatMeanSummary,
+  formatRateSummary,
+  normalCiMean,
+  summarizeRate,
+} from '../lib/stats.js';
 import type { Config } from '../trading/config.js';
 import type { ClaudeClient } from './client.js';
 import { extractJson } from './schema.js';
@@ -67,6 +73,14 @@ interface OrderRow {
   decision_audit: string | null;
 }
 
+interface ClosedTradeRow {
+  symbol: string;
+  buy_price: number | null;
+  sell_price: number;
+  sell_submitted_at: number;
+  buy_submitted_at: number | null;
+}
+
 const SYSTEM_PROMPT_POSTMORTEM = `You are reviewing a trading bot's decisions from one day, against the
 following day's outcomes. Your job is to identify patterns of good and bad
 calls — NOT to grade individual trades luckily/unluckily.
@@ -114,6 +128,37 @@ export async function runPostmortem(
     )
     .all(dayStartMs, dayEndMs) as OrderRow[];
 
+  // Closed trades that finished on the day under review: each filled sell paired
+  // with the most recent prior filled buy of the same symbol. FIFO-by-time, not
+  // qty-aware — a partial scale-out is reported as one trade against the most
+  // recent buy. Good enough for aggregate win-rate framing; do not confuse with
+  // P&L bookkeeping.
+  const closedTrades = db
+    .prepare(
+      `SELECT s.symbol               AS symbol,
+              s.filled_avg_price     AS sell_price,
+              s.submitted_at         AS sell_submitted_at,
+              (SELECT b.filled_avg_price FROM orders b
+                 WHERE b.symbol = s.symbol
+                   AND b.side = 'buy'
+                   AND b.filled_avg_price IS NOT NULL
+                   AND b.submitted_at < s.submitted_at
+                 ORDER BY b.submitted_at DESC LIMIT 1) AS buy_price,
+              (SELECT b.submitted_at FROM orders b
+                 WHERE b.symbol = s.symbol
+                   AND b.side = 'buy'
+                   AND b.filled_avg_price IS NOT NULL
+                   AND b.submitted_at < s.submitted_at
+                 ORDER BY b.submitted_at DESC LIMIT 1) AS buy_submitted_at
+         FROM orders s
+        WHERE s.side = 'sell'
+          AND s.filled_avg_price IS NOT NULL
+          AND s.submitted_at >= ?
+          AND s.submitted_at < ?
+        ORDER BY s.submitted_at ASC`,
+    )
+    .all(dayStartMs, dayEndMs) as ClosedTradeRow[];
+
   const equityRow = db
     .prepare(
       `SELECT equity_usd FROM equity_history WHERE date = ?
@@ -137,7 +182,14 @@ export async function runPostmortem(
     return empty;
   }
 
-  const userPrompt = buildPrompt(date, decisions, orders, equityRow?.equity_usd, nextDayEquityRow);
+  const userPrompt = buildPrompt(
+    date,
+    decisions,
+    orders,
+    closedTrades,
+    equityRow?.equity_usd,
+    nextDayEquityRow,
+  );
   const response = await claude.complete({
     systemPrompt: SYSTEM_PROMPT_POSTMORTEM,
     userPrompt,
@@ -173,6 +225,7 @@ function buildPrompt(
   date: string,
   decisions: DecisionRow[],
   orders: OrderRow[],
+  closedTrades: ClosedTradeRow[],
   startEquity: number | undefined,
   nextDayEquity: { equity_usd: number; date: string } | undefined,
 ): string {
@@ -188,6 +241,8 @@ function buildPrompt(
             }`,
         )
         .join('\n');
+
+  const aggregateBlock = formatAggregatePerformance(closedTrades);
 
   const decisionCount = decisions.length;
   const equityChange =
@@ -205,11 +260,44 @@ function buildPrompt(
     `Orders: ${orders.length}`,
     equityChange,
     '',
+    '== Aggregate performance (closed trades on this day) ==',
+    aggregateBlock,
+    '',
     '== Orders ==',
     orderSummary,
     '',
     `Reply with JSON: { "summary_md": "...", "lessons": [...] }.`,
   ].join('\n');
+}
+
+/**
+ * Render closed-trade win rate + mean return with confidence intervals so the
+ * model treats small samples as directional rather than precise. The aggregate
+ * pairs each filled sell with the most recent prior filled buy of the same
+ * symbol (FIFO-by-time, not qty-aware) — gross of fees and slippage between
+ * the recorded fill prices.
+ */
+function formatAggregatePerformance(closedTrades: ClosedTradeRow[]): string {
+  const pairs = closedTrades.filter(
+    (t) => t.buy_price !== null && t.buy_price > 0 && t.sell_price > 0,
+  );
+  if (pairs.length === 0) {
+    return '(no closed trades — nothing exited on this day, or no matching buy entry)';
+  }
+  const returnsPct = pairs.map((t) => ((t.sell_price - (t.buy_price as number)) / (t.buy_price as number)) * 100);
+  const wins = returnsPct.filter((r) => r > 0).length;
+  const rate = summarizeRate(wins, returnsPct.length);
+  const mean = normalCiMean(returnsPct);
+  const lines = [
+    `Win rate: ${formatRateSummary(rate)}`,
+    mean ? `Per-trade return: ${formatMeanSummary(mean, '%')}` : 'Per-trade return: n/a',
+  ];
+  if (rate.lowSample) {
+    lines.push(
+      'NOTE: small sample — the CI is wide. Treat the rate and mean as directional, not as proof of edge or lack thereof.',
+    );
+  }
+  return lines.join('\n');
 }
 
 function persistPostmortem(r: PostmortemResult): void {

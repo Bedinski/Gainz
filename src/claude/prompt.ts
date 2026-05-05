@@ -1,3 +1,4 @@
+import { isLowSample } from '../lib/stats.js';
 import type { Config } from '../trading/config.js';
 import type {
   CongressSignals,
@@ -33,6 +34,11 @@ Rules of engagement:
 6. Be conservative. The cash-account phase is small ($2–3K). It is fine — and \
    correct — to propose ZERO trades when no signal converges. Capital \
    preservation > activity.
+7. Each signal block carries an [n=X] count and a LOW_SAMPLE tag when count \
+   is below 6. LOW_SAMPLE means the signal is directional but not statistically \
+   distinguishable from noise — treat it as supporting evidence at most, never as \
+   the deciding factor. A buy proposal whose only positive signal is LOW_SAMPLE \
+   should be rare and explicitly justified in the reasoning field.
 
 Structured signal block (REQUIRED on every buy proposal):
 You MUST populate a "signals" object on every buy. Score each independent \
@@ -221,7 +227,8 @@ export function buildUserPrompt({
           return `  • ${t.transactionDate}  ${filer}${cmtes} — ${t.transactionType.toUpperCase()} ${amount}${disc}${tagStr}`;
         })
         .join('\n');
-      return `${symbol} — recent congressional trades (filtered, last ${cfg.CONGRESS_MAX_AGE_DAYS}d):\n${lines}`;
+      const sampleTag = isLowSample(list.length) ? ` [n=${list.length}, LOW_SAMPLE]` : ` [n=${list.length}]`;
+      return `${symbol} — recent congressional trades (filtered, last ${cfg.CONGRESS_MAX_AGE_DAYS}d)${sampleTag}:\n${lines}`;
     })
     .join('\n\n');
 
@@ -236,7 +243,8 @@ export function buildUserPrompt({
               return `  • ${t}  [${n.category}]  ${n.headline}  (${n.source})`;
             })
             .join('\n');
-          return `${symbol} — recent news (last ${cfg.NEWS_LOOKBACK_HOURS}h, signal-bearing only):\n${lines}`;
+          const sampleTag = isLowSample(list.length) ? ` [n=${list.length}, LOW_SAMPLE]` : ` [n=${list.length}]`;
+          return `${symbol} — recent news (last ${cfg.NEWS_LOOKBACK_HOURS}h, signal-bearing only)${sampleTag}:\n${lines}`;
         })
         .join('\n\n')
     : '';

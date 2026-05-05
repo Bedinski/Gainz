@@ -113,4 +113,74 @@ describe('runPostmortem', () => {
     const rows = getRawSqlite().prepare('SELECT COUNT(*) AS c FROM postmortems').get() as { c: number };
     expect(rows.c).toBe(0);
   });
+
+  it('renders an aggregate win-rate + CI block from closed trades on the day', async () => {
+    const cfg = loadConfig(env);
+    const date = '2026-05-01';
+    const db = getRawSqlite();
+    const dayStart = Date.parse(`${date}T14:30:00Z`);
+    // Day before: two prior buys to be paired with today's two sells.
+    db.prepare(
+      `INSERT INTO orders (alpaca_order_id, symbol, side, type, qty, notional_usd, status,
+                            filled_avg_price, submitted_at, decision_audit)
+       VALUES (?, ?, 'buy', 'stop', 1, 100, 'filled', ?, ?, ?)`,
+    ).run('b1', 'AAPL', 100, dayStart - 86_400_000, '[momentum] entry');
+    db.prepare(
+      `INSERT INTO orders (alpaca_order_id, symbol, side, type, qty, notional_usd, status,
+                            filled_avg_price, submitted_at, decision_audit)
+       VALUES (?, ?, 'buy', 'stop', 1, 100, 'filled', ?, ?, ?)`,
+    ).run('b2', 'MSFT', 200, dayStart - 86_400_000, '[momentum] entry');
+    // Sells on the day under review: AAPL +5%, MSFT -2.5%.
+    db.prepare(
+      `INSERT INTO orders (alpaca_order_id, symbol, side, type, qty, status,
+                            filled_avg_price, submitted_at, decision_audit)
+       VALUES (?, ?, 'sell', 'market', 1, 'filled', ?, ?, ?)`,
+    ).run('s1', 'AAPL', 105, dayStart + 60_000, '[momentum] exit');
+    db.prepare(
+      `INSERT INTO orders (alpaca_order_id, symbol, side, type, qty, status,
+                            filled_avg_price, submitted_at, decision_audit)
+       VALUES (?, ?, 'sell', 'trailing_stop', 1, 'filled', ?, ?, ?)`,
+    ).run('s2', 'MSFT', 195, dayStart + 120_000, '[momentum] exit');
+
+    let captured = '';
+    const claude: ClaudeClient = {
+      complete: async ({ userPrompt }) => {
+        captured = userPrompt;
+        return {
+          text: JSON.stringify({ summary_md: 'ok', lessons: [] }),
+          model: 'claude-sonnet-4-6',
+        };
+      },
+    };
+
+    await runPostmortem(cfg, claude, date, { skipPersist: true });
+
+    // Aggregate block present.
+    expect(captured).toContain('Aggregate performance');
+    // 1 win out of 2 → 50%, n=2, LOW_SAMPLE.
+    expect(captured).toMatch(/Win rate:\s+1\/2\s+=\s+50\.0%/);
+    expect(captured).toContain('LOW_SAMPLE');
+    // Mean per-trade return is roughly +1.25% ((5 + -2.5)/2).
+    expect(captured).toContain('Per-trade return');
+    expect(captured).toMatch(/mean\s+1\.25%/);
+  });
+
+  it('reports "no closed trades" when nothing exited that day', async () => {
+    const cfg = loadConfig(env);
+    seedDay('2026-05-01'); // seeds a buy only
+
+    let captured = '';
+    const claude: ClaudeClient = {
+      complete: async ({ userPrompt }) => {
+        captured = userPrompt;
+        return {
+          text: JSON.stringify({ summary_md: 'ok', lessons: [] }),
+          model: 'claude-sonnet-4-6',
+        };
+      },
+    };
+    await runPostmortem(cfg, claude, '2026-05-01', { skipPersist: true });
+    expect(captured).toContain('Aggregate performance');
+    expect(captured).toContain('no closed trades');
+  });
 });
