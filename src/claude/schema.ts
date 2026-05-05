@@ -14,7 +14,7 @@ const tolerantText = (max: number) =>
 
 const signalEvidenceSchema = z.object({
   strength: z.union([z.literal(0), z.literal(1), z.literal(2)]),
-  evidence: z.string().max(500),
+  evidence: tolerantText(800),
 });
 
 export const proposalSignalsSchema = z.object({
@@ -22,7 +22,7 @@ export const proposalSignalsSchema = z.object({
   congress: signalEvidenceSchema,
   news: signalEvidenceSchema,
   earnings_proximity: z.enum(['clear', 'within_blackout']),
-  conflicts: z.array(z.string().max(300)).max(10).default([]),
+  conflicts: z.array(tolerantText(500)).max(10).default([]),
 });
 
 export const tradeProposalSchema = z.object({
