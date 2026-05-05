@@ -20,7 +20,8 @@
     "backtest": "tsx scripts/backtest.ts",
     "signals:refresh": "tsx scripts/refresh-signals.ts",
     "postmortem": "tsx scripts/postmortem.ts",
-    "reconcile": "tsx scripts/reconcile.ts"
+    "reconcile": "tsx scripts/reconcile.ts",
+    "inspect": "tsx scripts/inspect.ts"
   },
   "dependencies": {
     "@alpacahq/alpaca-trade-api": "^3.0.1",
