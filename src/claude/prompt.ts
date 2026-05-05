@@ -108,10 +108,11 @@ align (technical setup + congress filing OR signal-bearing news, etc.). \
 Generic momentum alone is NOT enough — there must be a reason to pay attention \
 beyond price.
 
-Output strict JSON only:
+Output strict JSON only. Keep "notes" under 500 characters — this is a stage-1 \
+screen, not a writeup. Concrete tickers + one-liner rationales only.
 {
   "shortlist": ["TICKER1", "TICKER2"],
-  "notes": "brief reasoning"
+  "notes": "brief reasoning, <= 500 chars"
 }`;
 
 /**

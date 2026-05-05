@@ -1,5 +1,17 @@
 import { z } from 'zod';
 
+/**
+ * Postel's-law truncator for diagnostic free-text fields. Notes / reasoning /
+ * rationale are not load-bearing — when Claude goes chatty past the soft
+ * budget, clip rather than reject the whole response. A truncated notes field
+ * is still useful for audit; a parse error throws away the proposals too.
+ */
+const tolerantText = (max: number) =>
+  z.preprocess(
+    (v) => (typeof v === 'string' && v.length > max ? v.slice(0, max) : v),
+    z.string().max(max),
+  );
+
 const signalEvidenceSchema = z.object({
   strength: z.union([z.literal(0), z.literal(1), z.literal(2)]),
   evidence: z.string().max(500),
@@ -22,13 +34,13 @@ export const tradeProposalSchema = z.object({
   entry_trigger_price: z.number().positive().optional(),
   stop_loss_pct: z.number().positive().optional(),
   trailing_stop_pct: z.number().positive().optional(),
-  reasoning: z.string().max(1000).optional(),
+  reasoning: tolerantText(1500).optional(),
   signals: proposalSignalsSchema.optional(),
 });
 
 export const decisionResponseSchema = z.object({
   proposals: z.array(tradeProposalSchema).max(10),
-  notes: z.string().max(2000).optional(),
+  notes: tolerantText(2000).optional(),
 });
 
 /**
@@ -37,7 +49,7 @@ export const decisionResponseSchema = z.object({
  */
 export const shortlistResponseSchema = z.object({
   shortlist: z.array(z.string().min(1).max(8).transform((s) => s.toUpperCase())).max(3),
-  notes: z.string().max(1000).optional(),
+  notes: tolerantText(2000).optional(),
 });
 
 /**
@@ -45,7 +57,7 @@ export const shortlistResponseSchema = z.object({
  */
 export const debateResponseSchema = z.object({
   decision: z.enum(['proceed', 'skip']),
-  rationale: z.string().max(1000),
+  rationale: tolerantText(1500),
 });
 
 export type DecisionResponseRaw = z.infer<typeof decisionResponseSchema>;
