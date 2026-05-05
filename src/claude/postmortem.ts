@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { getRawSqlite } from '../db/client.js';
 import { logger } from '../lib/logger.js';
 import type { Config } from '../trading/config.js';
-import type { ClaudeClient, ToolCallRecord } from './client.js';
+import type { ClaudeClient } from './client.js';
 import { extractJson } from './schema.js';
 
 /**
@@ -13,11 +13,8 @@ import { extractJson } from './schema.js';
  * Output is a markdown summary + a structured JSON list of "lessons" that
  * future iterations can fold into the system prompt or training data.
  *
- * The post-mortem stage runs with `enableMcpTools: true` so the model can
- * pull UW flow / dark pool / congressional context for tickers it wants to
- * dig deeper on. The decision audit (D3) carries enough structured tags
- * that the model can group trades by regime / signal mix / debate verdict
- * without needing to re-pull market data.
+ * The decision audit (D3) carries enough structured tags that the model can
+ * group trades by regime / signal mix / debate verdict from the prompt alone.
  */
 
 const postmortemResponseSchema = z.object({
@@ -46,7 +43,6 @@ export interface PostmortemResult {
   lessons?: PostmortemLesson[];
   promptTokens?: number;
   completionTokens?: number;
-  toolCalls?: ToolCallRecord[];
   parseError?: string;
   rawResponse: string;
 }
@@ -76,7 +72,7 @@ following day's outcomes. Your job is to identify patterns of good and bad
 calls — NOT to grade individual trades luckily/unluckily.
 
 For each batch of orders + their decision audits, ask:
-  - Did the signal mix (technical/congress/news/options-flow) actually predict?
+  - Did the signal mix (technical/congress/news) actually predict?
   - Were the regime and sector tags right? Did the bot under- or over-react?
   - Did the bull/bear/judge debate add value or just delay?
   - Were any vol-clamped trades correct in retrospect (would unclamped have
@@ -145,7 +141,6 @@ export async function runPostmortem(
   const response = await claude.complete({
     systemPrompt: SYSTEM_PROMPT_POSTMORTEM,
     userPrompt,
-    enableMcpTools: true,
   });
 
   let summaryMd = response.text;
@@ -167,7 +162,6 @@ export async function runPostmortem(
     lessons,
     promptTokens: response.promptTokens,
     completionTokens: response.completionTokens,
-    toolCalls: response.toolCalls,
     parseError,
     rawResponse: response.text,
   };
@@ -214,9 +208,6 @@ function buildPrompt(
     '== Orders ==',
     orderSummary,
     '',
-    `Use the unusualwhales MCP tools to pull next-day price action, options`,
-    `flow, or dark-pool prints for any ticker that needs deeper context.`,
-    '',
     `Reply with JSON: { "summary_md": "...", "lessons": [...] }.`,
   ].join('\n');
 }
@@ -225,8 +216,8 @@ function persistPostmortem(r: PostmortemResult): void {
   const db = getRawSqlite();
   db.prepare(
     `INSERT OR REPLACE INTO postmortems (
-       date, generated_at, summary_md, lessons_json, prompt_tokens, completion_tokens, tool_call_count
-     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       date, generated_at, summary_md, lessons_json, prompt_tokens, completion_tokens
+     ) VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(
     r.date,
     Date.now(),
@@ -234,6 +225,5 @@ function persistPostmortem(r: PostmortemResult): void {
     r.lessons ? JSON.stringify(r.lessons) : null,
     r.promptTokens ?? null,
     r.completionTokens ?? null,
-    r.toolCalls?.length ?? 0,
   );
 }

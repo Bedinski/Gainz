@@ -85,7 +85,6 @@ async function main() {
             date: result.date,
             lessons: result.lessons?.length ?? 0,
             promptTokens: result.promptTokens,
-            toolCalls: result.toolCalls?.length ?? 0,
           },
           'postmortem complete',
         );

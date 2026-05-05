@@ -110,36 +110,6 @@ CREATE TABLE IF NOT EXISTS equity_history (
 );
 CREATE INDEX IF NOT EXISTS equity_history_date ON equity_history(date);
 
--- iter4: every UW MCP tool invocation by the LLM is logged for audit + replay.
-CREATE TABLE IF NOT EXISTS claude_tool_calls (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  decision_id INTEGER REFERENCES decisions(id),
-  call_index INTEGER NOT NULL, -- 0-based ordinal within the decision
-  tool_name TEXT NOT NULL,
-  args_json TEXT NOT NULL,
-  result_json TEXT,
-  duration_ms INTEGER,
-  error TEXT,
-  recorded_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS claude_tool_calls_decision ON claude_tool_calls(decision_id);
-
--- iter4: deterministic per-cycle UW flow pre-fetch cache.
-CREATE TABLE IF NOT EXISTS uw_flow_items (
-  source_id TEXT PRIMARY KEY,
-  symbol TEXT NOT NULL,
-  flow_type TEXT NOT NULL, -- 'sweep' | 'block' | 'unusual' | 'darkpool' | other UW classes
-  score REAL,              -- UW unusualness score if available
-  notional_usd REAL,
-  expiry TEXT,             -- option expiry YYYY-MM-DD; NULL for non-options (darkpool prints)
-  strike REAL,             -- NULL for non-options
-  side TEXT,               -- 'call' | 'put' | NULL for non-options
-  printed_at INTEGER NOT NULL,
-  fetched_at INTEGER NOT NULL,
-  raw_json TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS uw_flow_symbol_printed ON uw_flow_items(symbol, printed_at);
-
 -- iter4: position-vs-broker reconciliation runs.
 CREATE TABLE IF NOT EXISTS reconciliation_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,8 +127,7 @@ CREATE TABLE IF NOT EXISTS postmortems (
   summary_md TEXT NOT NULL,
   lessons_json TEXT,
   prompt_tokens INTEGER,
-  completion_tokens INTEGER,
-  tool_call_count INTEGER NOT NULL DEFAULT 0
+  completion_tokens INTEGER
 );
 
 -- iter4: alert dispatch log. Used for dedupe (key+TTL) and audit.

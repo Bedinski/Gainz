@@ -129,46 +129,6 @@ export const equityHistory = sqliteTable(
   }),
 );
 
-// iter4: per-decision audit of LLM tool invocations (UW MCP, future tools).
-export const claudeToolCalls = sqliteTable(
-  'claude_tool_calls',
-  {
-    id: integer('id').primaryKey({ autoIncrement: true }),
-    decisionId: integer('decision_id').references(() => decisions.id),
-    callIndex: integer('call_index').notNull(),
-    toolName: text('tool_name').notNull(),
-    argsJson: text('args_json').notNull(),
-    resultJson: text('result_json'),
-    durationMs: integer('duration_ms'),
-    error: text('error'),
-    recordedAt: integer('recorded_at', { mode: 'timestamp_ms' }).notNull(),
-  },
-  (t) => ({
-    byDecision: index('claude_tool_calls_decision').on(t.decisionId),
-  }),
-);
-
-// iter4: deterministic per-cycle UW pre-fetch cache.
-export const uwFlowItems = sqliteTable(
-  'uw_flow_items',
-  {
-    sourceId: text('source_id').primaryKey(),
-    symbol: text('symbol').notNull(),
-    flowType: text('flow_type').notNull(),
-    score: real('score'),
-    notionalUsd: real('notional_usd'),
-    expiry: text('expiry'),
-    strike: real('strike'),
-    side: text('side'),
-    printedAt: integer('printed_at', { mode: 'timestamp_ms' }).notNull(),
-    fetchedAt: integer('fetched_at', { mode: 'timestamp_ms' }).notNull(),
-    rawJson: text('raw_json').notNull(),
-  },
-  (t) => ({
-    symbolPrinted: index('uw_flow_symbol_printed').on(t.symbol, t.printedAt),
-  }),
-);
-
 // iter4: position-vs-broker reconciliation runs.
 export const reconciliationRuns = sqliteTable(
   'reconciliation_runs',
@@ -192,7 +152,6 @@ export const postmortems = sqliteTable('postmortems', {
   lessonsJson: text('lessons_json'),
   promptTokens: integer('prompt_tokens'),
   completionTokens: integer('completion_tokens'),
-  toolCallCount: integer('tool_call_count').notNull().default(0),
 });
 
 // iter4: alert dispatch log + dedupe.

@@ -133,18 +133,6 @@ const envSchema = z.object({
   DEBATE_JUDGE_MODEL: z.string().default('claude-haiku-4-5-20251001'),
   DEBATE_MULTI_MODEL_ENABLED: boolFromEnv.default(false),
 
-  // Unusual Whales MCP server (Phase 2 — flag only; wiring lands later in iter4).
-  UW_MCP_ENABLED: boolFromEnv.default(false),
-  UW_API_KEY: z.string().optional(),
-  UW_MCP_TRANSPORT: z.enum(['stdio']).default('stdio'),
-  UW_MCP_BINARY: z.string().default('npx -y unusual-whales-mcp'),
-
-  // Source of congressional-trade signals.
-  // 'uw'    — Unusual Whales (queried by the LLM via MCP; per-cycle prompt block omitted)
-  // 'capitoltrades' — legacy iter3 path (DB-cached, rendered into the prompt)
-  // 'off'   — no congress signal
-  CONGRESS_SOURCE: z.enum(['uw', 'capitoltrades', 'off']).default('capitoltrades'),
-
   // Alert dispatcher. SMTP and/or webhook transports.
   ALERT_MIN_SEVERITY: z.enum(['info', 'warn', 'critical']).default('warn'),
   ALERT_DEDUPE_TTL_MIN: z.coerce.number().int().positive().default(30),

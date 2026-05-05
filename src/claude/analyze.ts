@@ -6,7 +6,7 @@ import type {
   PortfolioSnapshot,
   TradeProposal,
 } from '../trading/types.js';
-import type { ClaudeClient, ToolCallRecord } from './client.js';
+import type { ClaudeClient } from './client.js';
 import { buildUserPrompt, SYSTEM_PROMPT_STABLE } from './prompt.js';
 import { decisionResponseSchema, extractJson, toCamel } from './schema.js';
 
@@ -36,8 +36,6 @@ export interface AnalyzeResult {
   completionTokens?: number;
   notes?: string;
   parseError?: string;
-  /** iter4 A2: tool calls the model made (UW MCP, etc.) during this stage. */
-  toolCalls?: ToolCallRecord[];
 }
 
 export async function analyze({
@@ -67,7 +65,6 @@ export async function analyze({
   const response = await claude.complete({
     systemPrompt: SYSTEM_PROMPT_STABLE,
     userPrompt,
-    enableMcpTools: true,
   });
 
   let proposals: TradeProposal[] = [];
@@ -90,6 +87,5 @@ export async function analyze({
     completionTokens: response.completionTokens,
     notes,
     parseError,
-    toolCalls: response.toolCalls,
   };
 }

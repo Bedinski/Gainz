@@ -34,7 +34,6 @@ async function main() {
       lessons: result.lessons?.length ?? 0,
       promptTokens: result.promptTokens,
       completionTokens: result.completionTokens,
-      toolCalls: result.toolCalls?.length ?? 0,
       parseError: result.parseError,
     },
     'postmortem complete',

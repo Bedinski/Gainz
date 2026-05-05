@@ -188,17 +188,9 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
     logger.warn({ err: String(err) }, 'getSettledCash failed; skipping settled-cash check');
   }
 
-  // 4. congress signals. iter4 A3: source is configurable.
-  //   - 'capitoltrades' (default, iter3 behavior): use the cached congress
-  //     trades table; the prompt renders a congress block.
-  //   - 'uw': UW MCP exposes congress data as a tool; we skip the per-cycle
-  //     prompt block and let the model query UW on demand. (Fall back to
-  //     the cached table if MCP isn't actually wired up.)
-  //   - 'off': no congress signal at all.
-  const congress =
-    cfg.CONGRESS_SOURCE === 'capitoltrades'
-      ? loadCongressSignals(cfg.SYMBOL_ALLOWLIST, cfg.CONGRESS_LOOKBACK_DAYS)
-      : ({} as ReturnType<typeof loadCongressSignals>);
+  // 4. congress signals — cached congress trades table; the prompt renders
+  //    a congress block per allowlisted symbol.
+  const congress = loadCongressSignals(cfg.SYMBOL_ALLOWLIST, cfg.CONGRESS_LOOKBACK_DAYS);
 
   // 4b. news (refresh + load if enabled). News pull covers allowlist + dip
   // symbols so political_shock items can gate dip detection.
@@ -287,12 +279,6 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
   let parseError: string | undefined;
   let shortlistSize: number | undefined;
   let dipEntries = 0;
-  // iter4 A2: collect tool calls across all analyze stages so we can persist
-  // them once after the decision row exists. Tagged with the stage label.
-  const cycleToolCalls: Array<{
-    stage: string;
-    calls: Array<{ name: string; args: unknown; result?: unknown; error?: string }>;
-  }> = [];
 
   try {
     if (deps.singleStage) {
@@ -313,7 +299,6 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
       promptTokens = r.promptTokens;
       completionTokens = r.completionTokens;
       parseError = r.parseError;
-      if (r.toolCalls?.length) cycleToolCalls.push({ stage: 'analyze', calls: r.toolCalls });
     } else {
       const stage1 = await shortlist({
         cfg,
@@ -348,7 +333,6 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
         promptTokens = (promptTokens ?? 0) + (r.promptTokens ?? 0);
         completionTokens = (completionTokens ?? 0) + (r.completionTokens ?? 0);
         if (r.parseError) parseError = (parseError ?? '') + `\n[deep ${symbol}] ${r.parseError}`;
-        if (r.toolCalls?.length) cycleToolCalls.push({ stage: `deep:${symbol}`, calls: r.toolCalls });
       }
     }
   } catch (err) {
@@ -392,7 +376,6 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
         promptTokens = (promptTokens ?? 0) + (r.promptTokens ?? 0);
         completionTokens = (completionTokens ?? 0) + (r.completionTokens ?? 0);
         if (r.parseError) parseError = (parseError ?? '') + `\n[dip ${event.symbol}] ${r.parseError}`;
-        if (r.toolCalls?.length) cycleToolCalls.push({ stage: `dip:${event.symbol}`, calls: r.toolCalls });
         if (!r.proposal || r.proposal.decision !== 'enter') continue;
         const dipProp: TradeProposal = {
           symbol: r.proposal.symbol,
@@ -437,30 +420,6 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
       parseError ?? null,
     );
   const decisionId = Number(decisionInsert.lastInsertRowid);
-
-  // iter4 A2: persist tool-call audit rows. One row per tool invocation,
-  // tagged with the decision id and stage label. These power post-mortem
-  // reasoning + future fixture replay.
-  if (cycleToolCalls.length > 0) {
-    const insertTool = db.prepare(
-      `INSERT INTO claude_tool_calls (decision_id, call_index, tool_name, args_json, result_json, error, recorded_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    );
-    let idx = 0;
-    for (const { stage, calls } of cycleToolCalls) {
-      for (const c of calls) {
-        insertTool.run(
-          decisionId,
-          idx++,
-          `${stage}:${c.name}`,
-          safeJson(c.args),
-          c.result === undefined ? null : safeJson(c.result),
-          c.error ?? null,
-          now.getTime(),
-        );
-      }
-    }
-  }
 
   // 6. guardrails per proposal. Per-strategy existing exposure is computed
   // once per cycle so all dip proposals share the same starting budget.
@@ -855,14 +814,6 @@ async function manageOpenPositions(
 function ensureDailyState(today: string) {
   const db = getRawSqlite();
   db.prepare('INSERT OR IGNORE INTO daily_state (date) VALUES (?)').run(today);
-}
-
-function safeJson(v: unknown): string {
-  try {
-    return JSON.stringify(v);
-  } catch {
-    return JSON.stringify({ _serializationError: String(v).slice(0, 200) });
-  }
 }
 
 function computeQty(
