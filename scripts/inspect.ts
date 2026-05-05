@@ -91,6 +91,41 @@ function main() {
   const today = new Date().toISOString().slice(0, 10);
   const daily = db.prepare('SELECT * FROM daily_state WHERE date = ?').get(today);
   console.table(daily ? [daily] : [{ note: `no row for ${today}` }]);
+
+  console.log('\n=== Most recent decision (Claude raw response) ===');
+  const lastDecision = db
+    .prepare(
+      `SELECT id, timestamp, model, prompt_tokens, completion_tokens,
+              parsed_proposals_json, raw_response, error_message
+         FROM decisions ORDER BY id DESC LIMIT 1`,
+    )
+    .get() as
+    | {
+        id: number;
+        timestamp: number;
+        model: string;
+        prompt_tokens: number | null;
+        completion_tokens: number | null;
+        parsed_proposals_json: string;
+        raw_response: string;
+        error_message: string | null;
+      }
+    | undefined;
+  if (!lastDecision) {
+    console.log('(no decisions yet)');
+  } else {
+    console.log(
+      `decision #${lastDecision.id}  ${new Date(lastDecision.timestamp).toISOString()}  ` +
+        `model=${lastDecision.model}  prompt=${lastDecision.prompt_tokens}  completion=${lastDecision.completion_tokens}`,
+    );
+    if (lastDecision.error_message) {
+      console.log(`error_message: ${lastDecision.error_message}`);
+    }
+    console.log(`parsed_proposals_json: ${lastDecision.parsed_proposals_json}`);
+    console.log('--- raw_response (truncated to 4000 chars) ---');
+    const raw = lastDecision.raw_response ?? '';
+    console.log(raw.length > 4000 ? raw.slice(0, 4000) + `\n... [${raw.length - 4000} more chars]` : raw);
+  }
 }
 
 try {
