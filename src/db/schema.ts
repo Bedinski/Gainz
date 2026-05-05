@@ -68,6 +68,8 @@ export const positionsMeta = sqliteTable('positions_meta', {
   // iter3: bailout deadline (ms). Dip strategy populates; momentum leaves null.
   timeExitAt: integer('time_exit_at', { mode: 'timestamp_ms' }),
   dipEventId: integer('dip_event_id'),
+  // iter4: GICS-ish sector tag for portfolio-level sector exposure cap.
+  sector: text('sector'),
 });
 
 export const dailyState = sqliteTable('daily_state', {
@@ -109,7 +111,107 @@ export const botState = sqliteTable('bot_state', {
   id: integer('id').primaryKey(), // singleton row, id=1
   enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+  // iter4: 'normal' | 'drain' (close-only) | 'off' (same as enabled=0).
+  mode: text('mode', { enum: ['normal', 'drain', 'off'] }).notNull().default('normal'),
 });
+
+// iter4: rolling per-cycle equity snapshot for the 30d drawdown circuit breaker.
+export const equityHistory = sqliteTable(
+  'equity_history',
+  {
+    recordedAt: integer('recorded_at', { mode: 'timestamp_ms' }).primaryKey(),
+    date: text('date').notNull(),
+    equityUsd: real('equity_usd').notNull(),
+    cashUsd: real('cash_usd').notNull(),
+  },
+  (t) => ({
+    dateIdx: index('equity_history_date').on(t.date),
+  }),
+);
+
+// iter4: per-decision audit of LLM tool invocations (UW MCP, future tools).
+export const claudeToolCalls = sqliteTable(
+  'claude_tool_calls',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    decisionId: integer('decision_id').references(() => decisions.id),
+    callIndex: integer('call_index').notNull(),
+    toolName: text('tool_name').notNull(),
+    argsJson: text('args_json').notNull(),
+    resultJson: text('result_json'),
+    durationMs: integer('duration_ms'),
+    error: text('error'),
+    recordedAt: integer('recorded_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (t) => ({
+    byDecision: index('claude_tool_calls_decision').on(t.decisionId),
+  }),
+);
+
+// iter4: deterministic per-cycle UW pre-fetch cache.
+export const uwFlowItems = sqliteTable(
+  'uw_flow_items',
+  {
+    sourceId: text('source_id').primaryKey(),
+    symbol: text('symbol').notNull(),
+    flowType: text('flow_type').notNull(),
+    score: real('score'),
+    notionalUsd: real('notional_usd'),
+    expiry: text('expiry'),
+    strike: real('strike'),
+    side: text('side'),
+    printedAt: integer('printed_at', { mode: 'timestamp_ms' }).notNull(),
+    fetchedAt: integer('fetched_at', { mode: 'timestamp_ms' }).notNull(),
+    rawJson: text('raw_json').notNull(),
+  },
+  (t) => ({
+    symbolPrinted: index('uw_flow_symbol_printed').on(t.symbol, t.printedAt),
+  }),
+);
+
+// iter4: position-vs-broker reconciliation runs.
+export const reconciliationRuns = sqliteTable(
+  'reconciliation_runs',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    runAt: integer('run_at', { mode: 'timestamp_ms' }).notNull(),
+    mismatches: integer('mismatches').notNull().default(0),
+    severity: text('severity', { enum: ['ok', 'warn', 'critical'] }).notNull().default('ok'),
+    mismatchesJson: text('mismatches_json'),
+  },
+  (t) => ({
+    byTime: index('reconciliation_runs_at').on(t.runAt),
+  }),
+);
+
+// iter4: daily post-mortem output.
+export const postmortems = sqliteTable('postmortems', {
+  date: text('date').primaryKey(),
+  generatedAt: integer('generated_at', { mode: 'timestamp_ms' }).notNull(),
+  summaryMd: text('summary_md').notNull(),
+  lessonsJson: text('lessons_json'),
+  promptTokens: integer('prompt_tokens'),
+  completionTokens: integer('completion_tokens'),
+  toolCallCount: integer('tool_call_count').notNull().default(0),
+});
+
+// iter4: alert dispatch log + dedupe.
+export const alertsSent = sqliteTable(
+  'alerts_sent',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    sentAt: integer('sent_at', { mode: 'timestamp_ms' }).notNull(),
+    severity: text('severity', { enum: ['info', 'warn', 'critical'] }).notNull(),
+    title: text('title').notNull(),
+    body: text('body').notNull(),
+    dedupeKey: text('dedupe_key').notNull(),
+    transports: text('transports').notNull(),
+    error: text('error'),
+  },
+  (t) => ({
+    byDedupe: index('alerts_dedupe').on(t.dedupeKey, t.sentAt),
+  }),
+);
 
 export const congressTrades = sqliteTable(
   'congress_trades',

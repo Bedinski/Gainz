@@ -23,7 +23,16 @@ import {
 } from '../strategies/dip-recovery/detector.js';
 import { analyzeDip } from '../strategies/dip-recovery/analyze.js';
 import { runDipExits } from '../strategies/dip-recovery/exit.js';
-import type { DipEntryProposal, TradeProposal } from './types.js';
+import { classifyRegime, formatRegimeLine } from '../strategies/regime.js';
+import {
+  checkDrawdownCircuitBreaker,
+  loadEquityHistory,
+  recordEquity,
+} from './circuit-breaker.js';
+import { reconcilePositions } from './reconcile.js';
+import { sendAlert } from '../lib/alerts.js';
+import { SYMBOL_SECTOR } from '../signals/congress/committees.js';
+import type { DipEntryProposal, Regime, TradeProposal } from './types.js';
 
 export interface CycleDeps {
   cfg?: Config;
@@ -55,6 +64,11 @@ export interface CycleResult {
   dipEventsExpired?: number;
   dipEntries?: number;
   dipExits?: number;
+  // iter4
+  regime?: Regime;
+  drainMode?: boolean;
+  circuitBreakerTriggered?: boolean;
+  reconciliationMismatches?: number;
 }
 
 const SKIP_OUTPUT = (reason: string, ranAt: string): CycleResult => ({
@@ -74,9 +88,16 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
   const today = ranAt.slice(0, 10);
   const db = getRawSqlite();
 
-  // 0. bot enabled?
-  const bot = db.prepare('SELECT enabled FROM bot_state WHERE id = 1').get() as { enabled: number } | undefined;
+  // 0. bot enabled? + drain mode triage.
+  // mode='off' is a soft kill (same effect as enabled=0); mode='drain' lets
+  // the cycle continue but the guardrail rejects every new buy so existing
+  // positions can exit cleanly (close-only).
+  const bot = db
+    .prepare('SELECT enabled, mode FROM bot_state WHERE id = 1')
+    .get() as { enabled: number; mode?: string } | undefined;
   if (bot && !bot.enabled) return SKIP_OUTPUT('bot disabled', ranAt);
+  if (bot?.mode === 'off') return SKIP_OUTPUT('bot mode=off', ranAt);
+  const drainMode = bot?.mode === 'drain';
 
   // 0b. daily halt?
   ensureDailyState(today);
@@ -101,6 +122,34 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
     daily?.realized_pnl ?? 0,
     daily?.trade_count ?? 0,
   );
+
+  // iter4 C3: record equity datapoint + drawdown circuit breaker check.
+  // Fires BEFORE market/Claude work so a triggered breaker short-circuits the
+  // expensive parts of the cycle.
+  recordEquity(now, portfolio.equityUsd, portfolio.cashUsd);
+  if (cfg.CIRCUIT_BREAKER_ENABLED) {
+    const verdict = checkDrawdownCircuitBreaker(loadEquityHistory(), cfg, now);
+    if (verdict.triggered) {
+      db.prepare('UPDATE daily_state SET halted = 1, halt_reason = ? WHERE date = ?').run(
+        verdict.reason.slice(0, 500),
+        today,
+      );
+      await sendAlert(
+        {
+          severity: 'critical',
+          title: 'Circuit breaker fired',
+          body: verdict.reason,
+          dedupeKey: `circuit-breaker:${today}`,
+        },
+        cfg,
+      ).catch((err) => logger.error({ err: String(err) }, 'circuit-breaker alert dispatch failed'));
+      return {
+        ...SKIP_OUTPUT('circuit breaker', ranAt),
+        circuitBreakerTriggered: true,
+        drainMode,
+      };
+    }
+  }
   // Fetch market data for the allowlist plus any dip-strategy symbols (typically
   // SPY/QQQ). Dedup so a symbol that lives in both lists is fetched once.
   const marketSymbols = Array.from(
@@ -110,6 +159,26 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
     ]),
   );
   const market = await fetchMarketSnapshot(deps.alpaca, marketSymbols);
+
+  // iter4 B2: macro regime classification from the snapshot. Reuses SPY bars
+  // already pulled. Pure function — adds zero new HTTP calls.
+  const regimeReading = classifyRegime(market, cfg);
+  const regimeLine = formatRegimeLine(regimeReading);
+
+  // iter4 C1: existing sector exposure across all open positions. One query
+  // per cycle; results shared across every guardrail evaluation below.
+  const sectorRows = db
+    .prepare(
+      `SELECT COALESCE(sector, '') AS sector, COALESCE(SUM(qty * entry_price), 0) AS exposure
+       FROM positions_meta
+       WHERE qty > 0
+       GROUP BY sector`,
+    )
+    .all() as Array<{ sector: string; exposure: number }>;
+  const sectorExposureUsd: Record<string, number> = {};
+  for (const r of sectorRows) {
+    if (r.sector) sectorExposureUsd[r.sector] = r.exposure;
+  }
 
   // settled cash for the cash-account guardrail (T+1)
   let settledCashAvailable: number | undefined;
@@ -171,6 +240,10 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
       return formatDrawdownLine(sym, drawdownMap[sym] ?? null);
     });
   }
+
+  // iter4 B2: prepend the regime summary so it shows up in the prompt's
+  // "Market state" block whether or not the dip strategy is enabled.
+  marketStateLines = [regimeLine, ...marketStateLines];
 
   // recent decisions (last 5)
   const recent = db
@@ -365,6 +438,9 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
   for (const item of pipeline) {
     const proposal = item.proposal;
     const earningsDays = daysUntilEarnings(proposal.symbol, now);
+    const symbolUpper = proposal.symbol.toUpperCase();
+    const snap = market[symbolUpper];
+    const proposalSector = SYMBOL_SECTOR[symbolUpper];
     const outcome = evaluateProposal(proposal, {
       cfg,
       portfolio,
@@ -374,6 +450,13 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
       settledCashAvailable,
       strategyTag: item.strategyTag,
       strategyExistingExposureUsd: item.strategyTag === 'dip_recovery' ? dipExposureUsd : undefined,
+      // iter4 wiring:
+      drainMode,
+      atr14: snap?.atr14,
+      latestPrice: snap?.latestPrice,
+      sectorExposureUsd,
+      proposalSector,
+      regime: regimeReading.regime,
     });
 
     const finalProposal: TradeProposal = outcome.clampedProposal ?? proposal;
@@ -435,8 +518,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
 
     approved++;
 
-    // 7. execute
-    const snap = market[finalProposal.symbol.toUpperCase()];
+    // 7. execute. Reuse the `snap` already resolved before the guardrail call.
     if (!snap) {
       logger.warn({ symbol: finalProposal.symbol }, 'no market snapshot; skipping order');
       continue;
@@ -500,9 +582,9 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
              symbol, opened_at, entry_price, qty, atr_at_entry,
              current_stop_alpaca_order_id, current_stop_type, current_stop_price,
              trailing_stop_pct, highest_price_seen,
-             strategy_tag, target_price, time_exit_at, dip_event_id
+             strategy_tag, target_price, time_exit_at, dip_event_id, sector
            )
-           VALUES (?, ?, ?, ?, ?, ?, 'fixed', ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, 'fixed', ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(symbol) DO UPDATE SET
              qty = qty + excluded.qty,
              current_stop_price = MIN(current_stop_price, excluded.current_stop_price),
@@ -510,7 +592,8 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
              highest_price_seen = MAX(highest_price_seen, excluded.highest_price_seen),
              target_price = COALESCE(excluded.target_price, positions_meta.target_price),
              time_exit_at = COALESCE(excluded.time_exit_at, positions_meta.time_exit_at),
-             dip_event_id = COALESCE(excluded.dip_event_id, positions_meta.dip_event_id)`,
+             dip_event_id = COALESCE(excluded.dip_event_id, positions_meta.dip_event_id),
+             sector = COALESCE(positions_meta.sector, excluded.sector)`,
         ).run(
           finalProposal.symbol,
           now.getTime(),
@@ -525,6 +608,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
           item.dipTargetPrice ?? null,
           item.dipTimeExitAt ?? null,
           item.dipEventId ?? null,
+          proposalSector ?? null,
         );
         // Mark the dip event as 'entered' and link the position so the
         // detector won't insert a second event for the same drawdown.
@@ -562,6 +646,29 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
       .get() as { c: number }
   ).c;
 
+  // iter4 C4: position reconciliation. Detect-only — drift triggers a critical
+  // alert but doesn't auto-correct. Run at end-of-cycle so any orders we just
+  // submitted have had a chance to fill (best-effort; reconciliation runs are
+  // also a standalone cron in worker.ts).
+  let reconciliationMismatches = 0;
+  try {
+    const recon = await reconcilePositions(deps.alpaca, cfg, now);
+    reconciliationMismatches = recon.mismatches.length;
+    if (recon.severity !== 'ok') {
+      await sendAlert(
+        {
+          severity: recon.severity === 'critical' ? 'critical' : 'warn',
+          title: `Reconciliation drift (${recon.mismatches.length} mismatch${recon.mismatches.length === 1 ? '' : 'es'})`,
+          body: JSON.stringify(recon.mismatches, null, 2).slice(0, 4000),
+          dedupeKey: `reconcile:${today}:${recon.severity}`,
+        },
+        cfg,
+      ).catch((err) => logger.error({ err: String(err) }, 'reconciliation alert dispatch failed'));
+    }
+  } catch (err) {
+    logger.error({ err: String(err) }, 'reconciliation run threw; skipping');
+  }
+
   return {
     ranAt,
     decisionId,
@@ -578,6 +685,10 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
     dipEventsExpired: dipLifecycle.expired,
     dipEntries,
     dipExits: dipExitsCount,
+    regime: regimeReading.regime,
+    drainMode,
+    circuitBreakerTriggered: false,
+    reconciliationMismatches,
   };
 }
 

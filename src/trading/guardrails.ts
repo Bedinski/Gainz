@@ -31,6 +31,37 @@ export interface GuardrailContext {
    * exposure across all positions (legacy behavior).
    */
   strategyExistingExposureUsd?: number;
+  /**
+   * iter4: when true, the bot is in close-only "drain" mode. Buys are rejected
+   * at the guardrail; sells and stop upgrades pass through.
+   */
+  drainMode?: boolean;
+  /**
+   * iter4: ATR(14) for the proposal symbol — needed for vol-targeted sizing
+   * (B1) and per-trade VaR (C2). Caller looks this up from MarketSnapshot.
+   * Undefined skips both checks (preserves iter3 behavior on legacy paths).
+   */
+  atr14?: number;
+  /**
+   * iter4: latest mid/ask price for the symbol. Combined with `atr14` to
+   * derive a daily-vol estimate for the VaR check. Undefined skips VaR.
+   */
+  latestPrice?: number;
+  /**
+   * iter4: per-sector exposure already on the books (USD), keyed by sector
+   * tag. Used to enforce SECTOR_EXPOSURE_MAX_PCT.
+   */
+  sectorExposureUsd?: Record<string, number>;
+  /**
+   * iter4: GICS sector for the proposal symbol (from SYMBOL_SECTOR or UW
+   * sector lookup). Undefined skips the sector cap for this proposal.
+   */
+  proposalSector?: string;
+  /**
+   * iter4: macro regime classification. Drives risk scaling (chop) and
+   * outright reject of new buys (risk_off, when REGIME_RISK_OFF_REJECTS_BUYS).
+   */
+  regime?: 'risk_on' | 'chop' | 'risk_off';
 }
 
 /**
@@ -57,6 +88,22 @@ export function evaluateProposal(
 
   if (isHaltedToday) {
     return { status: 'rejected', reason: 'daily halt active' };
+  }
+
+  // iter4 drain mode: bot is in close-only triage. Sells / stop upgrades
+  // proceed through other paths; the guardrail rejects new buys.
+  if (ctx.drainMode && proposal.side === 'buy') {
+    return { status: 'rejected', reason: 'drain-mode: new buys disabled' };
+  }
+
+  // iter4 regime gate: in 'risk_off' macro regime, new buys are rejected
+  // outright (when configured). Existing positions still exit normally.
+  if (
+    proposal.side === 'buy' &&
+    ctx.regime === 'risk_off' &&
+    cfg.REGIME_RISK_OFF_REJECTS_BUYS
+  ) {
+    return { status: 'rejected', reason: 'regime=risk_off: new buys disabled' };
   }
 
   if (tradesToday >= cfg.MAX_TRADES_PER_DAY) {
@@ -136,6 +183,35 @@ export function evaluateProposal(
     didClamp = true;
   }
 
+  // iter4 vol-targeted sizing (B1). When enabled, scale `notionalUsd` so that
+  // a stop-loss event = approx. RISK_PER_TRADE_PCT of equity. Effective stop
+  // distance is the max of the proposal's stopLossPct and the ATR-based stop
+  // (orders.ts uses the wider of the two), which mirrors execution geometry.
+  // Regime-aware: in 'chop' regime, scale risk-per-trade down by
+  // REGIME_CHOP_RISK_SCALE.
+  if (
+    proposal.side === 'buy' &&
+    cfg.VOL_SIZING_ENABLED &&
+    ctx.atr14 !== undefined &&
+    ctx.latestPrice !== undefined &&
+    clamped.notionalUsd !== undefined &&
+    clamped.stopLossPct !== undefined &&
+    isFinite(ctx.atr14) &&
+    ctx.latestPrice > 0
+  ) {
+    const stopFracFromPct = clamped.stopLossPct / 100;
+    const stopFracFromAtr = (cfg.ATR_MULT * ctx.atr14) / ctx.latestPrice;
+    const effectiveStopFrac = Math.max(stopFracFromPct, stopFracFromAtr);
+    if (effectiveStopFrac > 0) {
+      const riskScale = ctx.regime === 'chop' ? cfg.REGIME_CHOP_RISK_SCALE : 1;
+      const targetNotional = (portfolio.equityUsd * (cfg.RISK_PER_TRADE_PCT / 100) * riskScale) / effectiveStopFrac;
+      if (targetNotional < clamped.notionalUsd) {
+        clamped.notionalUsd = targetNotional;
+        didClamp = true;
+      }
+    }
+  }
+
   // Position-size cap (existing exposure + this order). Strategy-aware:
   // momentum uses MAX_POSITION_USD per-symbol; dip_recovery uses DIP_BUDGET_USD
   // as a strategy-wide cap (existing exposure passed in by the caller).
@@ -160,6 +236,54 @@ export function evaluateProposal(
       }
       clamped.notionalUsd = room;
       didClamp = true;
+    }
+  }
+
+  // iter4 sector exposure cap (C1). Sum of (existing sector exposure + this
+  // proposal) cannot exceed SECTOR_EXPOSURE_MAX_PCT of equity. Clamp down when
+  // there's room; reject when sector is full.
+  if (
+    proposal.side === 'buy' &&
+    clamped.notionalUsd !== undefined &&
+    ctx.proposalSector &&
+    ctx.sectorExposureUsd
+  ) {
+    const sectorCap = portfolio.equityUsd * (cfg.SECTOR_EXPOSURE_MAX_PCT / 100);
+    const existingSector = ctx.sectorExposureUsd[ctx.proposalSector] ?? 0;
+    const projected = existingSector + clamped.notionalUsd;
+    if (projected > sectorCap) {
+      const room = Math.max(0, sectorCap - existingSector);
+      if (room <= 0) {
+        return {
+          status: 'rejected',
+          reason: `sector ${ctx.proposalSector} cap reached: existing=${existingSector.toFixed(0)} >= cap=${sectorCap.toFixed(0)} (${cfg.SECTOR_EXPOSURE_MAX_PCT}% of equity)`,
+        };
+      }
+      clamped.notionalUsd = room;
+      didClamp = true;
+    }
+  }
+
+  // iter4 per-trade VaR (C2). Reject if a 2-sigma daily move on the order
+  // would cost more than MAX_TRADE_VAR_PCT of equity. Daily vol estimate uses
+  // ATR/price (ATR is daily true-range so this is a reasonable proxy).
+  if (
+    proposal.side === 'buy' &&
+    clamped.notionalUsd !== undefined &&
+    ctx.atr14 !== undefined &&
+    ctx.latestPrice !== undefined &&
+    isFinite(ctx.atr14) &&
+    ctx.latestPrice > 0 &&
+    portfolio.equityUsd > 0
+  ) {
+    const dailyVolFrac = ctx.atr14 / ctx.latestPrice;
+    const var2Sigma = clamped.notionalUsd * 2 * dailyVolFrac;
+    const ceiling = portfolio.equityUsd * (cfg.MAX_TRADE_VAR_PCT / 100);
+    if (var2Sigma > ceiling) {
+      return {
+        status: 'rejected',
+        reason: `VaR(2σ)=${var2Sigma.toFixed(0)} > MAX_TRADE_VAR_PCT (${cfg.MAX_TRADE_VAR_PCT}% of equity = ${ceiling.toFixed(0)})`,
+      };
     }
   }
 

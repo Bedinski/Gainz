@@ -101,6 +101,20 @@ export type NewsSignals = Record<string, NewsSignalItem[]>;
 
 export type StrategyTag = 'momentum' | 'dip_recovery';
 
+/**
+ * iter4: bot operating mode.
+ *  - 'normal': cycle runs; new buys allowed.
+ *  - 'drain':  cycle runs; buys rejected at the guardrail; sells, stop upgrades,
+ *              and dip exits proceed. Lets you cleanly close out the book.
+ *  - 'off':    cycle short-circuits at the gate (same effect as enabled=0).
+ */
+export type BotMode = 'normal' | 'drain' | 'off';
+
+/**
+ * iter4: macro regime classification used to scale risk.
+ */
+export type Regime = 'risk_on' | 'chop' | 'risk_off';
+
 export type DipEventStatus = 'active' | 'entered' | 'recovered' | 'expired' | 'failed';
 
 export interface DipEvent {

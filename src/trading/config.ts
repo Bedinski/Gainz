@@ -104,6 +104,61 @@ const envSchema = z.object({
   PROMPT_VERSION: z.string().default('v2'),
 
   LOG_LEVEL: z.string().default('info'),
+
+  // -------- iter4: portfolio risk + ops --------
+  // Vol-targeted sizing. When enabled, MAX_POSITION_USD becomes an upper bound
+  // and the actual size targets RISK_PER_TRADE_PCT of equity at 1× ATR move.
+  VOL_SIZING_ENABLED: boolFromEnv.default(true),
+  RISK_PER_TRADE_PCT: z.coerce.number().positive().default(0.5),
+
+  // Sector exposure cap as a percent of total equity.
+  SECTOR_EXPOSURE_MAX_PCT: z.coerce.number().positive().default(30),
+
+  // Per-trade VaR rejection. var2σ = notional × 2 × dailyVol; reject if > MAX_TRADE_VAR_PCT × equity.
+  MAX_TRADE_VAR_PCT: z.coerce.number().positive().default(1),
+
+  // Rolling-N-day drawdown circuit breaker.
+  CIRCUIT_BREAKER_ENABLED: boolFromEnv.default(true),
+  CIRCUIT_BREAKER_DD_PCT: z.coerce.number().positive().default(5),
+  CIRCUIT_BREAKER_WINDOW_DAYS: z.coerce.number().int().positive().default(30),
+  CIRCUIT_BREAKER_COOLDOWN_DAYS: z.coerce.number().int().positive().default(5),
+
+  // Macro regime classifier output.
+  REGIME_RISK_OFF_REJECTS_BUYS: boolFromEnv.default(true),
+  REGIME_CHOP_RISK_SCALE: z.coerce.number().positive().max(1).default(0.5),
+
+  // Multi-model debate. Each side runs on a different model; judge breaks ties.
+  DEBATE_BULL_MODEL: z.string().default('claude-sonnet-4-6'),
+  DEBATE_BEAR_MODEL: z.string().default('claude-opus-4-7'),
+  DEBATE_JUDGE_MODEL: z.string().default('claude-haiku-4-5-20251001'),
+  DEBATE_MULTI_MODEL_ENABLED: boolFromEnv.default(false),
+
+  // Unusual Whales MCP server (Phase 2 — flag only; wiring lands later in iter4).
+  UW_MCP_ENABLED: boolFromEnv.default(false),
+  UW_API_KEY: z.string().optional(),
+  UW_MCP_TRANSPORT: z.enum(['stdio']).default('stdio'),
+  UW_MCP_BINARY: z.string().default('npx -y unusual-whales-mcp'),
+
+  // Source of congressional-trade signals.
+  // 'uw'    — Unusual Whales (queried by the LLM via MCP; per-cycle prompt block omitted)
+  // 'capitoltrades' — legacy iter3 path (DB-cached, rendered into the prompt)
+  // 'off'   — no congress signal
+  CONGRESS_SOURCE: z.enum(['uw', 'capitoltrades', 'off']).default('capitoltrades'),
+
+  // Alert dispatcher. SMTP and/or webhook transports.
+  ALERT_MIN_SEVERITY: z.enum(['info', 'warn', 'critical']).default('warn'),
+  ALERT_DEDUPE_TTL_MIN: z.coerce.number().int().positive().default(30),
+  ALERT_SMTP_HOST: z.string().optional(),
+  ALERT_SMTP_PORT: z.coerce.number().int().positive().optional(),
+  ALERT_SMTP_USER: z.string().optional(),
+  ALERT_SMTP_PASS: z.string().optional(),
+  ALERT_SMTP_FROM: z.string().optional(),
+  ALERT_SMTP_TO: z.string().optional(),
+  ALERT_WEBHOOK_URL: z.string().optional(),
+
+  // Reconciliation tolerances. Drift above either is a critical alert.
+  RECONCILE_QTY_TOLERANCE: z.coerce.number().min(0).default(0.001),
+  RECONCILE_NOTIONAL_TOLERANCE_USD: z.coerce.number().min(0).default(1),
 });
 
 export type Config = z.infer<typeof envSchema>;

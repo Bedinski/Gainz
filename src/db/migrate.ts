@@ -61,7 +61,9 @@ CREATE TABLE IF NOT EXISTS positions_meta (
   strategy_tag TEXT NOT NULL DEFAULT 'momentum' CHECK (strategy_tag IN ('momentum','dip_recovery')),
   target_price REAL,
   time_exit_at INTEGER,
-  dip_event_id INTEGER
+  dip_event_id INTEGER,
+  -- iter4: GICS sector tag for portfolio-level sector exposure cap
+  sector TEXT
 );
 
 CREATE TABLE IF NOT EXISTS daily_state (
@@ -94,8 +96,83 @@ CREATE INDEX IF NOT EXISTS dip_events_status ON dip_events(status, symbol);
 CREATE TABLE IF NOT EXISTS bot_state (
   id INTEGER PRIMARY KEY,
   enabled INTEGER NOT NULL DEFAULT 1,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  -- iter4: 'normal' | 'drain' (close-only, reject new buys) | 'off' (same as enabled=0)
+  mode TEXT NOT NULL DEFAULT 'normal' CHECK (mode IN ('normal','drain','off'))
 );
+
+-- iter4: rolling per-cycle equity snapshot for the 30d drawdown circuit breaker.
+CREATE TABLE IF NOT EXISTS equity_history (
+  recorded_at INTEGER PRIMARY KEY, -- ms epoch; one row per cycle
+  date TEXT NOT NULL,              -- YYYY-MM-DD for cheap day-grouped queries
+  equity_usd REAL NOT NULL,
+  cash_usd REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS equity_history_date ON equity_history(date);
+
+-- iter4: every UW MCP tool invocation by the LLM is logged for audit + replay.
+CREATE TABLE IF NOT EXISTS claude_tool_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  decision_id INTEGER REFERENCES decisions(id),
+  call_index INTEGER NOT NULL, -- 0-based ordinal within the decision
+  tool_name TEXT NOT NULL,
+  args_json TEXT NOT NULL,
+  result_json TEXT,
+  duration_ms INTEGER,
+  error TEXT,
+  recorded_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS claude_tool_calls_decision ON claude_tool_calls(decision_id);
+
+-- iter4: deterministic per-cycle UW flow pre-fetch cache.
+CREATE TABLE IF NOT EXISTS uw_flow_items (
+  source_id TEXT PRIMARY KEY,
+  symbol TEXT NOT NULL,
+  flow_type TEXT NOT NULL, -- 'sweep' | 'block' | 'unusual' | 'darkpool' | other UW classes
+  score REAL,              -- UW unusualness score if available
+  notional_usd REAL,
+  expiry TEXT,             -- option expiry YYYY-MM-DD; NULL for non-options (darkpool prints)
+  strike REAL,             -- NULL for non-options
+  side TEXT,               -- 'call' | 'put' | NULL for non-options
+  printed_at INTEGER NOT NULL,
+  fetched_at INTEGER NOT NULL,
+  raw_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS uw_flow_symbol_printed ON uw_flow_items(symbol, printed_at);
+
+-- iter4: position-vs-broker reconciliation runs.
+CREATE TABLE IF NOT EXISTS reconciliation_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_at INTEGER NOT NULL,
+  mismatches INTEGER NOT NULL DEFAULT 0,
+  severity TEXT NOT NULL DEFAULT 'ok' CHECK (severity IN ('ok','warn','critical')),
+  mismatches_json TEXT
+);
+CREATE INDEX IF NOT EXISTS reconciliation_runs_at ON reconciliation_runs(run_at);
+
+-- iter4: daily post-mortem output. One row per trading day.
+CREATE TABLE IF NOT EXISTS postmortems (
+  date TEXT PRIMARY KEY, -- YYYY-MM-DD
+  generated_at INTEGER NOT NULL,
+  summary_md TEXT NOT NULL,
+  lessons_json TEXT,
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER,
+  tool_call_count INTEGER NOT NULL DEFAULT 0
+);
+
+-- iter4: alert dispatch log. Used for dedupe (key+TTL) and audit.
+CREATE TABLE IF NOT EXISTS alerts_sent (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sent_at INTEGER NOT NULL,
+  severity TEXT NOT NULL CHECK (severity IN ('info','warn','critical')),
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  dedupe_key TEXT NOT NULL,
+  transports TEXT NOT NULL, -- comma-separated (e.g. 'smtp,webhook')
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS alerts_dedupe ON alerts_sent(dedupe_key, sent_at);
 
 CREATE TABLE IF NOT EXISTS congress_trades (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -164,6 +241,10 @@ const ADDITIVE_MIGRATIONS: string[] = [
   `ALTER TABLE positions_meta ADD COLUMN dip_event_id INTEGER`,
   // iter3: daily_state dip P&L bucket
   `ALTER TABLE daily_state ADD COLUMN dip_realized_pnl REAL NOT NULL DEFAULT 0`,
+  // iter4: positions_meta sector tag (populated from SYMBOL_SECTOR lookup)
+  `ALTER TABLE positions_meta ADD COLUMN sector TEXT`,
+  // iter4: bot_state mode for normal / drain / off triage
+  `ALTER TABLE bot_state ADD COLUMN mode TEXT NOT NULL DEFAULT 'normal'`,
 ];
 
 export function applySchema(db = getRawSqlite()) {
