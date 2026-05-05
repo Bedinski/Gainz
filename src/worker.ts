@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './lib/env.js';
 import cron from 'node-cron';
 import { loadConfig } from './trading/config.js';
 import { applySchema } from './db/migrate.js';

@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import '../src/lib/env.js';
 import { loadConfig } from '../src/trading/config.js';
 import { createRestClient } from '../src/alpaca/client.js';
 import { computeATR } from '../src/trading/atr.js';

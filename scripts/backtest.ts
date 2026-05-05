@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import '../src/lib/env.js';
 import { closeDb, getDb, getRawSqlite } from '../src/db/client.js';
 import { applySchema } from '../src/db/migrate.js';
 import { loadConfig, type Config } from '../src/trading/config.js';

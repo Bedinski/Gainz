@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import '../src/lib/env.js';
 import { applySchema } from '../src/db/migrate.js';
 import { closeDb, getDb } from '../src/db/client.js';
 import { runCycle } from '../src/trading/cycle.js';
