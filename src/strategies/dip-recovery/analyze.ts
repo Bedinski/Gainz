@@ -7,7 +7,7 @@ import type {
   NewsSignals,
   PortfolioSnapshot,
 } from '../../trading/types.js';
-import type { ClaudeClient } from '../../claude/client.js';
+import type { ClaudeClient, ToolCallRecord } from '../../claude/client.js';
 import { extractJson, proposalSignalsSchema } from '../../claude/schema.js';
 import { buildDipUserPrompt, SYSTEM_PROMPT_DIP_RECOVERY } from './prompt.js';
 import type { DrawdownReading } from './detector.js';
@@ -40,6 +40,7 @@ export interface AnalyzeDipResult {
   promptTokens?: number;
   completionTokens?: number;
   parseError?: string;
+  toolCalls?: ToolCallRecord[];
 }
 
 /**
@@ -60,6 +61,7 @@ export async function analyzeDip({
   const response = await claude.complete({
     systemPrompt: SYSTEM_PROMPT_DIP_RECOVERY,
     userPrompt,
+    enableMcpTools: true,
   });
 
   let proposal: DipEntryProposal | undefined;
@@ -85,5 +87,6 @@ export async function analyzeDip({
     promptTokens: response.promptTokens,
     completionTokens: response.completionTokens,
     parseError,
+    toolCalls: response.toolCalls,
   };
 }

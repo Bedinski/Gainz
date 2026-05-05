@@ -9,6 +9,9 @@ import { createSdkClient } from './claude/client.js';
 import { logger } from './lib/logger.js';
 import { refreshCongressTrades } from './signals/congress/refresh.js';
 import { refreshAlpacaNews } from './signals/news/alpaca.js';
+import { runPostmortem } from './claude/postmortem.js';
+import { reconcilePositions } from './trading/reconcile.js';
+import { sendAlert } from './lib/alerts.js';
 
 async function main() {
   const cfg = loadConfig();
@@ -66,6 +69,63 @@ async function main() {
       { timezone: cfg.CRON_TZ },
     );
   }
+
+  // iter4 B4: daily post-mortem at 6pm ET, M-F. Reviews yesterday's decisions
+  // against today's market closes; output lands in the `postmortems` table.
+  cron.schedule(
+    '0 18 * * 1-5',
+    async () => {
+      try {
+        const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+          .toISOString()
+          .slice(0, 10);
+        const result = await runPostmortem(cfg, claude, yesterday);
+        logger.info(
+          {
+            date: result.date,
+            lessons: result.lessons?.length ?? 0,
+            promptTokens: result.promptTokens,
+            toolCalls: result.toolCalls?.length ?? 0,
+          },
+          'postmortem complete',
+        );
+      } catch (err) {
+        logger.error({ err: String(err) }, 'postmortem threw');
+      }
+    },
+    { timezone: cfg.CRON_TZ },
+  );
+
+  // iter4 C4: standalone reconciliation cron (in addition to per-cycle run).
+  // Catches drift outside trading hours — e.g. a corporate action or a manual
+  // broker-side adjustment that happens after market close.
+  cron.schedule(
+    '0 17 * * 1-5',
+    async () => {
+      try {
+        const result = await reconcilePositions(alpaca, cfg);
+        if (result.severity !== 'ok') {
+          await sendAlert(
+            {
+              severity: result.severity === 'critical' ? 'critical' : 'warn',
+              title: `Reconciliation drift (post-close): ${result.mismatches.length} mismatch${
+                result.mismatches.length === 1 ? '' : 'es'
+              }`,
+              body: JSON.stringify(result.mismatches, null, 2).slice(0, 4000),
+              dedupeKey: `reconcile-eod:${new Date().toISOString().slice(0, 10)}`,
+            },
+            cfg,
+          ).catch((err) =>
+            logger.error({ err: String(err) }, 'eod reconciliation alert dispatch failed'),
+          );
+        }
+        logger.info({ result }, 'eod reconciliation complete');
+      } catch (err) {
+        logger.error({ err: String(err) }, 'eod reconciliation threw');
+      }
+    },
+    { timezone: cfg.CRON_TZ },
+  );
 
   // Keep alive.
   process.on('SIGTERM', () => {

@@ -18,7 +18,9 @@
     "simulate": "tsx scripts/simulate.ts",
     "replay": "tsx scripts/replay.ts",
     "backtest": "tsx scripts/backtest.ts",
-    "signals:refresh": "tsx scripts/refresh-signals.ts"
+    "signals:refresh": "tsx scripts/refresh-signals.ts",
+    "postmortem": "tsx scripts/postmortem.ts",
+    "reconcile": "tsx scripts/reconcile.ts"
   },
   "dependencies": {
     "@alpacahq/alpaca-trade-api": "^3.0.1",
