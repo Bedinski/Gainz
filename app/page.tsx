@@ -55,6 +55,18 @@ interface DipEventRow {
   notes: string | null;
 }
 
+interface PendingOrderRow {
+  id: number;
+  alpaca_order_id: string | null;
+  symbol: string;
+  side: string;
+  type: string;
+  qty: number;
+  notional_usd: number | null;
+  status: string;
+  submitted_at: number;
+}
+
 export default function DashboardPage() {
   const cfg = loadConfig();
   getDb();
@@ -93,6 +105,23 @@ export default function DashboardPage() {
 
   const positions = db.prepare('SELECT * FROM positions_meta').all() as PositionMetaRow[];
 
+  // Pending buy orders that haven't filled yet — stop-buys waiting for trigger,
+  // notional brackets accepted but not yet filled, etc. These are real "plays
+  // in motion" that don't appear in positions_meta until the entry actually
+  // executes (per the deferred-positions_meta-on-fill fix).
+  const pendingOrders = db
+    .prepare(
+      `SELECT id, alpaca_order_id, symbol, side, type, qty, notional_usd, status, submitted_at
+         FROM orders
+        WHERE status IN ('new', 'accepted', 'pending_new', 'partially_filled')
+          AND side = 'buy'
+        ORDER BY id DESC
+        LIMIT 20`,
+    )
+    .all() as PendingOrderRow[];
+
+  const activePlaysTotal = positions.length + pendingOrders.length + dipEvents.length;
+
   const botRow = db.prepare('SELECT enabled FROM bot_state WHERE id = 1').get() as { enabled: number } | undefined;
   const botEnabled = botRow?.enabled !== 0;
 
@@ -129,6 +158,13 @@ export default function DashboardPage() {
               {daily?.halted ? <span className="badge badge-rejected">halted</span> : 'running'}
             </div>
             {daily?.halt_reason && <div className="muted mono" style={{ fontSize: 11 }}>{daily.halt_reason}</div>}
+          </div>
+          <div>
+            <div className="muted">Plays in motion</div>
+            <div style={{ fontSize: 22 }}>{activePlaysTotal}</div>
+            <div className="muted mono" style={{ fontSize: 11 }}>
+              {positions.length} pos · {pendingOrders.length} pending · {dipEvents.length} dip
+            </div>
           </div>
         </div>
       </section>
@@ -184,6 +220,50 @@ export default function DashboardPage() {
           )}
         </section>
       )}
+
+      <section className="card">
+        <h2>Pending entry orders ({pendingOrders.length})</h2>
+        <p className="muted" style={{ fontSize: 12 }}>
+          Buy orders submitted to Alpaca but not yet filled — typically stop-buys waiting for the
+          +0.3% trigger to confirm a breakout. Become positions once they fill.
+        </p>
+        {pendingOrders.length === 0 ? (
+          <p className="muted">none</p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>symbol</th>
+                <th>type</th>
+                <th>qty</th>
+                <th>notional</th>
+                <th>status</th>
+                <th>submitted</th>
+                <th>alpaca id</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pendingOrders.map((o) => (
+                <tr key={o.id}>
+                  <td className="mono">{o.symbol}</td>
+                  <td>{o.type}</td>
+                  <td>{o.qty}</td>
+                  <td>{o.notional_usd !== null ? `$${o.notional_usd.toFixed(0)}` : '—'}</td>
+                  <td>
+                    <span className="badge badge-clamped">{o.status}</span>
+                  </td>
+                  <td className="mono" style={{ fontSize: 11 }}>
+                    {new Date(o.submitted_at).toISOString().replace('T', ' ').slice(0, 19)}
+                  </td>
+                  <td className="mono" style={{ fontSize: 11 }}>
+                    {o.alpaca_order_id ? o.alpaca_order_id.slice(0, 8) : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
 
       <section className="card">
         <h2>Open positions ({positions.length})</h2>

@@ -48,7 +48,7 @@ export const decisionResponseSchema = z.object({
  * Designed cheap — small system prompt, small output budget.
  */
 export const shortlistResponseSchema = z.object({
-  shortlist: z.array(z.string().min(1).max(8).transform((s) => s.toUpperCase())).max(3),
+  shortlist: z.array(z.string().min(1).max(8).transform((s) => s.toUpperCase())).max(5),
   notes: tolerantText(2000).optional(),
 });
 
