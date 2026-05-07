@@ -69,6 +69,11 @@ export interface CycleResult {
   drainMode?: boolean;
   circuitBreakerTriggered?: boolean;
   reconciliationMismatches?: number;
+  /** False when Alpaca's clock reports the market is closed. Cycle still runs
+   *  the full pipeline; orders submitted in this state queue for the next
+   *  regular session. Surfaced so the post-cycle log distinguishes "ran
+   *  during market hours" from "ran after hours for review/queuing". */
+  marketOpen?: boolean;
 }
 
 const SKIP_OUTPUT = (reason: string, ranAt: string): CycleResult => ({
@@ -114,7 +119,19 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
     logger.error({ err: String(err) }, 'getClock failed');
     return SKIP_OUTPUT('clock unavailable', ranAt);
   }
-  if (!clock.is_open) return SKIP_OUTPUT('market closed', ranAt);
+  // After-hours mode: even when the market is closed we run the full cycle —
+  // analysis (signals, news refresh, Claude shortlist + deep + debate),
+  // decision-row write, AND trading actions. Alpaca queues stop-buys + limit
+  // orders for the next regular session, and trailing-stop upgrades lock in
+  // a base price relative to the close, which is exactly what the operator
+  // wants for "adjust the floor while I'm thinking about it." Sell-side
+  // market orders may bounce from Alpaca with extended-hours-restriction
+  // errors; those are logged via executeOrder's try/catch and don't break
+  // the cycle.
+  const marketOpen = clock.is_open;
+  if (!marketOpen) {
+    logger.info({ ranAt }, 'market closed: running full cycle (orders queue at Alpaca for next session)');
+  }
 
   // 2-3. portfolio + market
   const portfolio = await fetchPortfolioSnapshot(
@@ -696,7 +713,9 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
 
   // 8a. manage momentum positions: fixed stop → trailing stop upgrade.
   //     Strategy-aware: dip_recovery positions are skipped (their exit is
-  //     deterministic via runDipExits below).
+  //     deterministic via runDipExits below). Runs after-hours too — the
+  //     operator wants to adjust the trailing-stop floor any time it makes
+  //     sense relative to the most recent price.
   const managementUpgrades = await manageOpenPositions(deps.alpaca, cfg, market, now);
 
   // 8b. dip-recovery exits: target_price / time_exit_at deterministic exits.
@@ -757,6 +776,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
     drainMode,
     circuitBreakerTriggered: false,
     reconciliationMismatches,
+    marketOpen,
   };
 }
 

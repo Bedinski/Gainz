@@ -129,12 +129,36 @@ beforeEach(() => {
 });
 
 describe('runCycle (two-stage)', () => {
-  it('skips when market closed', async () => {
+  it('runs the full cycle even when the market is closed (analysis + queuing)', async () => {
+    // After-hours mode: cycle still produces a decision row, runs Claude
+    // analysis, and submits orders (Alpaca queues them for the next session).
+    // Manage step + dip exits also run — operators want to adjust trailing
+    // stops while looking at the close. The result.marketOpen flag tells
+    // operators whether the cycle ran live or after-hours.
     const cfg = loadConfig(env);
     getDb(':memory:');
     applySchema();
     const result = await runCycle({ cfg, alpaca: mockAlpaca(false), claude: twoStageClaude() });
-    expect(result.skippedReason).toBe('market closed');
+    expect(result.skippedReason).toBeUndefined();
+    expect(result.marketOpen).toBe(false);
+    expect(result.shortlistSize).toBe(1);
+    expect(result.proposals).toBe(1);
+    expect(result.approved).toBe(1);
+    expect(result.ordersSubmitted).toBe(1); // dry-run still counts
+    const decisionId = (getRawSqlite().prepare('SELECT id FROM decisions').get() as { id: number }).id;
+    expect(decisionId).toBeGreaterThan(0);
+  });
+
+  it('still skips on bot-disabled / halted / clock-unavailable (those are real halts)', async () => {
+    const cfg = loadConfig(env);
+    getDb(':memory:');
+    applySchema();
+    // Force the bot disabled.
+    getRawSqlite()
+      .prepare("INSERT INTO bot_state (id, enabled, updated_at, mode) VALUES (1, 0, ?, 'normal')")
+      .run(Date.now());
+    const result = await runCycle({ cfg, alpaca: mockAlpaca(true), claude: twoStageClaude() });
+    expect(result.skippedReason).toBe('bot disabled');
   });
 
   it('runs shortlist -> deep -> debate -> guardrails -> dry-run order', async () => {
