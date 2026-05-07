@@ -739,7 +739,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
   // also a standalone cron in worker.ts).
   let reconciliationMismatches = 0;
   try {
-    const recon = await reconcilePositions(deps.alpaca, cfg, now);
+    const recon = await reconcilePositions(deps.alpaca, cfg, now, { autoCorrect: true });
     reconciliationMismatches = recon.mismatches.length;
     if (recon.severity !== 'ok') {
       await sendAlert(

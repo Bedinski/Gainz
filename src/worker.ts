@@ -107,7 +107,7 @@ async function main() {
     '0 17 * * 1-5',
     async () => {
       try {
-        const result = await reconcilePositions(alpaca, cfg);
+        const result = await reconcilePositions(alpaca, cfg, undefined, { autoCorrect: true });
         if (result.severity !== 'ok') {
           await sendAlert(
             {
